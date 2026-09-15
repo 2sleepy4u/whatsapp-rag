@@ -16,6 +16,8 @@ import re
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Callable
 
+from ..analytics import clustering as clustering_mod
+from ..analytics import inside_jokes
 from ..db import stats as stats_mod
 
 MAX_TEXT = 400
@@ -227,6 +229,93 @@ def get_context(ctx: ToolContext, message_id: str, before: int = 5, after: int =
     return {"messages": [_message_dict(r) for r in ordered], "anchor": message_id}
 
 
+def topic_clusters(
+    ctx: ToolContext,
+    chat_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    min_cluster_size: int = 5,
+    top_terms: int = 8,
+    top_examples: int = 3,
+    evolution_bucket: str | None = None,
+) -> dict:
+    result, evolution = clustering_mod.analyze_topics(
+        ctx.collection,
+        chat_id=chat_id,
+        date_from=date_from,
+        date_to=date_to,
+        min_cluster_size=max(2, min(min_cluster_size, 50)),
+        top_terms=top_terms,
+        top_examples=top_examples,
+        evolution_bucket=evolution_bucket,
+    )
+    return {
+        "total_windows": result.total,
+        "noise": result.noise,
+        "noise_ratio": round(result.noise_ratio, 3),
+        "clusters": [
+            {
+                "cluster_id": c.cluster_id,
+                "size": c.size,
+                "label": c.label,
+                "terms": c.terms,
+                "start_date": c.start_date,
+                "end_date": c.end_date,
+                "examples": [
+                    {"id": e.id, "date": e.date, "sender": e.sender, "text": e.text}
+                    for e in c.examples
+                ],
+            }
+            for c in result.clusters
+        ],
+        "evolution": evolution,
+    }
+
+
+def inside_joke_candidates(
+    ctx: ToolContext,
+    chat_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    min_count: int = 5,
+    top: int = 30,
+) -> dict:
+    candidates = inside_jokes.candidate_ngrams(
+        ctx.conn, chat_id=chat_id, date_from=date_from, date_to=date_to,
+        min_count=max(2, min_count), top=min(top, 100),
+    )
+    return {
+        "candidates": [
+            {
+                "phrase": c.phrase,
+                "count": c.count,
+                "first": c.first,
+                "last": c.last,
+                "span_days": c.span_days,
+                "senders": [{"name": n, "count": k} for n, k in c.senders],
+            }
+            for c in candidates
+        ]
+    }
+
+
+def phrase_timeline(
+    ctx: ToolContext,
+    phrase: str,
+    chat_id: str | None = None,
+    bucket: str = "month",
+    top: int = 15,
+) -> dict:
+    timeline = inside_jokes.phrase_timeline(ctx.conn, phrase, chat_id=chat_id, bucket=bucket)
+    evidence = inside_jokes.phrase_evidence(ctx.conn, phrase, top=top, chat_id=chat_id)
+    return {
+        "phrase": phrase,
+        "total": sum(n for _, n in timeline),
+        "timeline": [{"period": p, "count": n} for p, n in timeline],
+        "evidence": evidence,
+    }
+
+
 def list_chats(ctx: ToolContext) -> list[dict]:
     rows = ctx.conn.execute(
         """
@@ -342,6 +431,53 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "topic_clusters",
+            "description": "Discover recurring topics/themes by clustering conversation windows. Use for 'what do we talk about most', topic changes over time. Returns clusters with distinctive terms and example message ids.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_cluster_size": {"type": "integer", "description": "Minimum messages per topic (default 5)"},
+                    "evolution_bucket": {"type": "string", "enum": ["month", "year"], "description": "Also return how topics evolve over time"},
+                    **_FILTERS,
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inside_joke_candidates",
+            "description": "Find frequently repeated phrases (2-4 words), i.e. candidate inside jokes. Returns phrase, frequency, first/last date and main users.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_count": {"type": "integer", "description": "Minimum occurrences (default 5)"},
+                    "top": {"type": "integer"},
+                    **_FILTERS,
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "phrase_timeline",
+            "description": "How often an exact phrase/nickname recurred over time, with example messages and ids. Use to see if an inside joke faded or changed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phrase": {"type": "string"},
+                    "bucket": {"type": "string", "enum": ["month", "year"]},
+                    "top": {"type": "integer"},
+                    **_FILTERS,
+                },
+                "required": ["phrase"],
+            },
+        },
+    },
 ]
 
 Dispatch = Callable[[ToolContext, dict], Any]
@@ -371,12 +507,30 @@ def _call_list(ctx: ToolContext, args: dict) -> Any:
     return list_chats(ctx)
 
 
+def _call_topics(ctx: ToolContext, args: dict) -> Any:
+    args = {k: v for k, v in args.items() if v is not None}
+    return topic_clusters(ctx, **args)
+
+
+def _call_jokes(ctx: ToolContext, args: dict) -> Any:
+    args = {k: v for k, v in args.items() if v is not None}
+    return inside_joke_candidates(ctx, **args)
+
+
+def _call_phrase(ctx: ToolContext, args: dict) -> Any:
+    args = {k: v for k, v in args.items() if v is not None}
+    return phrase_timeline(ctx, **args)
+
+
 _DISPATCH: dict[str, Dispatch] = {
     "list_chats": _call_list,
     "semantic_search": _call_semantic,
     "keyword_search": _call_keyword,
     "get_stats": _call_stats,
     "get_context": _call_context,
+    "topic_clusters": _call_topics,
+    "inside_joke_candidates": _call_jokes,
+    "phrase_timeline": _call_phrase,
 }
 
 

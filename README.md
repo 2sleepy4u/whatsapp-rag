@@ -13,7 +13,7 @@ citations back to the original messages.
 - [x] Phase 2 — statistics engine + CLI
 - [x] Phase 3 — embeddings + vector store (Chroma)
 - [x] Phase 4 — RAG agent with citations (v1)
-- [ ] Phase 5 — clustering / inside-joke discovery
+- [x] Phase 5 — clustering / inside-joke discovery
 - [ ] Phase 6 — local web UI
 - [ ] Phase 7 — voice-note transcription
 - [ ] Phase 8 — NixOS desktop deployment
@@ -70,6 +70,21 @@ Answers stream token-by-token and tool calls are printed as they run, so you
 see progress instead of a silent spinner. `Ollama` generation is capped with
 `CHAT_RAG_LLM_NUM_PREDICT` and thinking models (qwen3) can be quieted with
 `CHAT_RAG_LLM_THINK=0`.
+
+### Topics & inside jokes
+
+```bash
+uv run chat-rag topics --min-size 5 --evolution month   # cluster windows into themes
+uv run chat-rag jokes --min-count 5                     # repeated-phrase candidates
+uv run chat-rag timeline "la papera" --bucket month     # how a phrase evolved
+```
+
+`topics` normalises window embeddings, reduces them with PCA and clusters with
+HDBSCAN, labelling each cluster with its most distinctive terms (c-TF-IDF) and
+central messages (usable as citations). `jokes` counts repeated 2–4 word
+n-grams, suppresses fragments subsumed by longer phrases, and reports frequency,
+date span and main users. All three are also exposed to the agent as
+`topic_clusters`, `inside_joke_candidates` and `phrase_timeline`.
 
 Data lives under `./data/` (gitignored).
 

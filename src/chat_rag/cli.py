@@ -13,6 +13,8 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from .config import load_settings
+from .analytics import inside_jokes
+from .analytics.clustering import analyze_topics
 from .db import stats as stats_mod
 from .db.db import open_db
 from .embed.index import (
@@ -26,7 +28,7 @@ from .embed.ollama_embed import OllamaEmbedder
 from .ingest.loader import ingest_file
 from .ingest.parser_android import ParseStats, parse_file
 from .rag.citations import get_message
-from .rag.service import answer_question
+from .rag.service import answer_question, build_context
 from .rag.tools import ToolContext, get_context
 
 app = typer.Typer(help="Local RAG + analytics over exported WhatsApp chats.", no_args_is_help=True)
@@ -716,6 +718,120 @@ def expand(
         marker = "[cyan]>>[/]" if m["id"] == message_id else "  "
         console.print(f"{marker} [dim]{m['date']} {m['time']} {m['sender']} ({m['id']})[/]")
         console.print(f"   {m['text']}")
+    conn.close()
+
+
+@app.command()
+def topics(
+    chat: str | None = typer.Option(None, "--chat"),
+    date_from: str | None = typer.Option(None, "--from", help="YYYY-MM-DD"),
+    date_to: str | None = typer.Option(None, "--to", help="YYYY-MM-DD"),
+    min_size: int = typer.Option(5, "--min-size", help="Minimum windows per topic"),
+    top_terms: int = typer.Option(8, "--top-terms"),
+    examples: int = typer.Option(3, "--examples", help="Example messages per topic"),
+    evolution: str | None = typer.Option(None, "--evolution", help="month|year: show topic activity over time"),
+) -> None:
+    """Cluster conversation windows into topics and show their distinctive terms."""
+    settings = load_settings()
+    ctx = build_context(settings)
+    with console.status("[bold]Clustering topics...[/]"):
+        result, evo = analyze_topics(
+            ctx.collection, chat, date_from, date_to,
+            min_cluster_size=min_size, top_terms=top_terms, top_examples=examples,
+            evolution_bucket=evolution,
+        )
+    console.print(
+        f"[bold]{len(result.clusters)}[/] topics from {result.total:,} windows "
+        f"({result.noise:,} unclustered, {result.noise_ratio * 100:.0f}% noise)"
+    )
+    table = Table(title="Topics")
+    table.add_column("size", justify="right")
+    table.add_column("label")
+    table.add_column("range")
+    table.add_column("example", overflow="fold")
+    for c in result.clusters:
+        ex = c.examples[0] if c.examples else None
+        table.add_row(
+            f"{c.size:,}",
+            c.label,
+            f"{c.start_date}→{c.end_date}",
+            f"[dim]{ex.id[:8]}[/] {ex.sender}: {ex.text[:80]}" if ex else "",
+        )
+    console.print(table)
+
+    if evolution and evo:
+        etable = Table(title=f"Topic evolution by {evolution}")
+        etable.add_column("topic")
+        etable.add_column("size", justify="right")
+        etable.add_column("activity", overflow="fold")
+        for e in evo:
+            points = " ".join(f"{p['period']}:{p['count']}" for p in e["series"][-8:])
+            etable.add_row(e["label"] or str(e["cluster_id"]), f"{e['size']:,}", points)
+        console.print(etable)
+
+    ctx.conn.close()
+
+
+@app.command()
+def jokes(
+    chat: str | None = typer.Option(None, "--chat"),
+    date_from: str | None = typer.Option(None, "--from", help="YYYY-MM-DD"),
+    date_to: str | None = typer.Option(None, "--to", help="YYYY-MM-DD"),
+    min_count: int = typer.Option(5, "--min-count"),
+    top: int = typer.Option(30, "--top"),
+) -> None:
+    """Surface repeated phrases as inside-joke candidates."""
+    settings = load_settings()
+    conn = open_db(settings.db_path)
+    with console.status("[bold]Scanning repeated phrases...[/]"):
+        candidates = inside_jokes.candidate_ngrams(
+            conn, chat, date_from, date_to, min_count=min_count, top=top
+        )
+    console.print(f"[bold]{len(candidates)}[/] candidates (>= {min_count} occurrences)")
+    table = Table(title="Inside-joke candidates")
+    table.add_column("phrase", overflow="fold")
+    table.add_column("count", justify="right")
+    table.add_column("first")
+    table.add_column("last")
+    table.add_column("span", justify="right")
+    table.add_column("who", overflow="fold")
+    for c in candidates:
+        who = ", ".join(f"{n} ({k})" for n, k in c.senders[:3])
+        table.add_row(c.phrase, f"{c.count:,}", c.first, c.last, f"{c.span_days}d", who)
+    console.print(table)
+    console.print("[dim]Timeline of a phrase: chat-rag timeline \"la papera\"[/]")
+    conn.close()
+
+
+@app.command()
+def timeline(
+    phrase: str = typer.Argument(..., help="Exact phrase or nickname"),
+    chat: str | None = typer.Option(None, "--chat"),
+    bucket: str = typer.Option("month", "--bucket", help="month|year"),
+) -> None:
+    """Show how often an exact phrase recurred over time, with evidence."""
+    settings = load_settings()
+    conn = open_db(settings.db_path)
+    series = inside_jokes.phrase_timeline(conn, phrase, chat_id=chat, bucket=bucket)
+    total = sum(n for _, n in series)
+    console.print(f"[bold]{total:,}[/] occurrences of [cyan]{phrase!r}[/]")
+    max_n = max((n for _, n in series), default=0)
+    table = Table(title=f"Timeline by {bucket}")
+    table.add_column("period")
+    table.add_column("count", justify="right")
+    table.add_column("", justify="left")
+    for period, n in series:
+        table.add_row(period, f"{n:,}", _bar(n, max_n))
+    console.print(table)
+
+    evidence = inside_jokes.phrase_evidence(conn, phrase, top=10, chat_id=chat)
+    etable = Table(title="First occurrences")
+    etable.add_column("date")
+    etable.add_column("who")
+    etable.add_column("message", overflow="fold")
+    for m in evidence:
+        etable.add_row(m["date"], m["sender"], m["text"][:100])
+    console.print(etable)
     conn.close()
 
 

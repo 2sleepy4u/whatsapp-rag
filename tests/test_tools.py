@@ -66,3 +66,22 @@ def test_collect_message_ids():
     into: dict = {}
     tools.collect_message_ids(result, into)
     assert set(into) == {"aaaa", "bbbb", "cccc"}
+
+
+def test_dispatch_phrase_timeline(ctx):
+    data = tools.dispatch(ctx, "phrase_timeline", {"phrase": "mare"})
+    assert data["total"] == 2
+    assert all(e["id"] for e in data["evidence"])
+
+
+def test_dispatch_inside_jokes(ctx):
+    data = tools.dispatch(ctx, "inside_joke_candidates", {"min_count": 1, "top": 5})
+    assert "candidates" in data
+    assert all("phrase" in c and "count" in c for c in data["candidates"])
+
+
+def test_dispatch_topic_clusters(ctx):
+    data = tools.dispatch(ctx, "topic_clusters", {})
+    assert "clusters" in data
+    assert data["total_windows"] >= 0
+
