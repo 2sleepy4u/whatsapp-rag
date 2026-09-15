@@ -21,9 +21,11 @@ class FakeEmbedder:
     def __init__(self, dim: int = 16) -> None:
         self.dim = dim
         self.calls = 0
+        self.texts_seen = 0
 
     def embed(self, texts):
         self.calls += 1
+        self.texts_seen += len(texts)
         out = []
         for text in texts:
             vec = [0.0] * self.dim
@@ -101,6 +103,50 @@ def test_index_windows(tmp_path):
     assert stats.total == 4
     assert stats.embedded == 4
     assert stats.kind == "window"
+
+
+def test_index_messages_dedups_identical_texts(tmp_path):
+    conn = open_db(tmp_path / "chat.db")
+    _seed(conn)
+    # Add many messages that repeat the exact same (sender, text) pair.
+    for i in range(20):
+        conn.execute(
+            """
+            INSERT INTO messages
+                (id, chat_id, sender_id, ts, ts_local, local_date, local_time, text,
+                 raw_line, msg_type, source_file, line_no, ingested_at)
+            VALUES (?, ?, ?, ?, ?, '2024-01-01', '10:00', ?, ?, 'text', 't', ?, 0)
+            """,
+            (f"dup{i}", CHAT, A, 1700000000 + 100 + i, "2024-01-01 10:00:00", "ciao come va", "ciao come va", i),
+        )
+    conn.commit()
+    client = chroma_client(tmp_path / "chroma")
+    col = ensure_collection(client, "messages")
+    embedder = FakeEmbedder()
+
+    stats = index_messages(conn, col, embedder)
+    assert stats.embedded == 25
+    assert col.count() == 25
+    # Only the distinct texts should have been sent to the embedder.
+    assert stats.embed_texts == 5
+    assert embedder.texts_seen == 5
+
+
+def test_index_windows_mean_mode_pools_messages(tmp_path):
+    conn = open_db(tmp_path / "chat.db")
+    _seed(conn)
+    client = chroma_client(tmp_path / "chroma")
+    col = ensure_collection(client, "messages")
+    embedder = FakeEmbedder()
+    index_messages(conn, col, embedder)
+    calls_before = embedder.calls
+
+    stats = index_windows(conn, col, embedder, size=2, stride=1, window_mode="mean")
+    assert stats.kind == "window"
+    assert stats.embedded == 4
+    # Mean pooling must not call the embedder at all.
+    assert embedder.calls == calls_before
+    assert col.count() == 5 + 4
 
 
 def test_recreate_resets(tmp_path):

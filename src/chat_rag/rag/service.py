@@ -6,7 +6,7 @@ from ..config import Settings
 from ..db.db import open_db
 from ..embed.index import chroma_client, ensure_collection
 from ..embed.ollama_embed import OllamaEmbedder
-from .agent import AgentResult, LLM, OllamaLLM, run_agent
+from .agent import AgentResult, EventFn, LLM, OllamaLLM, TokenFn, run_agent
 from .citations import Citation, resolve_answer
 from .tools import ToolContext
 
@@ -40,15 +40,30 @@ def answer_question(
     max_steps: int = 6,
     system_extra: str | None = None,
     collection_name: str = "messages",
+    on_event: EventFn | None = None,
+    on_token: TokenFn | None = None,
 ) -> Answer:
     owns_ctx = ctx is None
     if ctx is None:
         settings.ensure_dirs()
         ctx = build_context(settings, collection_name)
     if llm is None:
-        llm = OllamaLLM(settings.llm_model, settings.ollama_host)
+        llm = OllamaLLM(
+            settings.llm_model,
+            settings.ollama_host,
+            num_predict=settings.llm_num_predict,
+            think=settings.llm_think,
+        )
 
-    result: AgentResult = run_agent(question, ctx, llm, max_steps=max_steps, system_extra=system_extra)
+    result: AgentResult = run_agent(
+        question,
+        ctx,
+        llm,
+        max_steps=max_steps,
+        system_extra=system_extra,
+        on_event=on_event,
+        on_token=on_token,
+    )
     citations = resolve_answer(ctx.conn, result.answer, result.fallback_ids)
     sources = resolve_answer(ctx.conn, "", result.fallback_ids)
 

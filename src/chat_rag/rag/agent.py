@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import ollama
 
@@ -35,33 +35,87 @@ class LLM(Protocol):
         ...
 
 
+def _parse_tool_calls(raw) -> list[ToolCall]:
+    calls: list[ToolCall] = []
+    for tc in raw or []:
+        fn = tc.function
+        args = fn.arguments
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        calls.append(ToolCall(name=fn.name, arguments=args or {}))
+    return calls
+
+
 class OllamaLLM:
-    def __init__(self, model: str, host: str, temperature: float = 0.0) -> None:
+    def __init__(
+        self,
+        model: str,
+        host: str,
+        temperature: float = 0.0,
+        keep_alive: str | int = "30m",
+        num_predict: int | None = 1024,
+        think: bool | None = False,
+    ) -> None:
         self.model = model
         self.temperature = temperature
+        self.keep_alive = keep_alive
+        self.num_predict = num_predict
+        self.think = think
         self._client = ollama.Client(host=host)
 
-    def chat(self, messages: list[dict], tools: list[dict] | None) -> AssistantTurn:
+    def _kwargs(self, messages: list[dict], tools: list[dict] | None, stream: bool) -> dict[str, Any]:
+        options: dict[str, Any] = {"temperature": self.temperature}
+        if self.num_predict:
+            options["num_predict"] = self.num_predict
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "options": {"temperature": self.temperature},
+            "options": options,
+            "keep_alive": self.keep_alive,
+            "stream": stream,
         }
         if tools:
             kwargs["tools"] = tools
-        response = self._client.chat(**kwargs)
+        if self.think is not None:
+            kwargs["think"] = self.think
+        return kwargs
+
+    def chat(self, messages: list[dict], tools: list[dict] | None) -> AssistantTurn:
+        response = self._client.chat(**self._kwargs(messages, tools, stream=False))
         msg = response.message
+        return AssistantTurn(content=msg.content, tool_calls=_parse_tool_calls(getattr(msg, "tool_calls", None)))
+
+    def stream_chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+        on_token: Callable[[str], None] | None = None,
+    ) -> AssistantTurn:
+        parts: list[str] = []
         calls: list[ToolCall] = []
-        for tc in getattr(msg, "tool_calls", None) or []:
-            fn = tc.function
-            args = fn.arguments
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {}
-            calls.append(ToolCall(name=fn.name, arguments=args or {}))
-        return AssistantTurn(content=msg.content, tool_calls=calls)
+        for chunk in self._client.chat(**self._kwargs(messages, tools, stream=True)):
+            msg = chunk.message
+            if msg.content:
+                parts.append(msg.content)
+                if on_token:
+                    on_token(msg.content)
+            calls.extend(_parse_tool_calls(getattr(msg, "tool_calls", None)))
+        return AssistantTurn(content="".join(parts) or None, tool_calls=calls)
+
+
+def _invoke(
+    llm: LLM,
+    messages: list[dict],
+    tools: list[dict] | None,
+    on_token: Callable[[str], None] | None,
+) -> AssistantTurn:
+    stream = getattr(llm, "stream_chat", None)
+    if stream is not None and on_token is not None:
+        return stream(messages, tools, on_token=on_token)
+    return llm.chat(messages, tools)
 
 
 @dataclass
@@ -74,6 +128,10 @@ class AgentResult:
     @property
     def fallback_ids(self) -> list[str]:
         return list(self.sources.keys())
+
+
+EventFn = Callable[[str, dict], None]
+TokenFn = Callable[[str], None]
 
 
 def system_prompt(ctx: ToolContext, extra: str | None = None) -> str:
@@ -115,6 +173,8 @@ def run_agent(
     llm: LLM,
     max_steps: int = 6,
     system_extra: str | None = None,
+    on_event: EventFn | None = None,
+    on_token: TokenFn | None = None,
 ) -> AgentResult:
     messages: list[dict] = [
         {"role": "system", "content": system_prompt(ctx, system_extra)},
@@ -123,8 +183,13 @@ def run_agent(
     sources: dict[str, dict] = {}
     steps: list[dict] = []
 
-    for _ in range(max_steps):
-        turn = llm.chat(messages, TOOL_SCHEMAS)
+    def emit(kind: str, **payload: Any) -> None:
+        if on_event:
+            on_event(kind, payload)
+
+    for step_no in range(max_steps):
+        emit("step_start", step=step_no + 1, max_steps=max_steps)
+        turn = _invoke(llm, messages, TOOL_SCHEMAS, on_token)
         if not turn.tool_calls:
             return AgentResult(answer=turn.content or "", messages=messages, steps=steps, sources=sources)
 
@@ -138,8 +203,11 @@ def run_agent(
             }
         )
         for call in turn.tool_calls:
+            emit("tool_call", name=call.name, arguments=call.arguments)
             result = dispatch(ctx, call.name, call.arguments)
             collect_message_ids(result, sources)
+            count = _result_count(result)
+            emit("tool_result", name=call.name, arguments=call.arguments, count=count)
             messages.append({"role": "tool", "content": dumps(result), "tool_name": call.name})
             steps.append({"tool": call.name, "arguments": call.arguments, "result": result})
 
@@ -149,5 +217,19 @@ def run_agent(
             "content": "Answer now using only the information gathered, with [id] citations.",
         }
     )
-    turn = llm.chat(messages, None)
+    emit("final", step=max_steps)
+    turn = _invoke(llm, messages, None, on_token)
     return AgentResult(answer=turn.content or "", messages=messages, steps=steps, sources=sources)
+
+
+def _result_count(result: Any) -> int:
+    if isinstance(result, list):
+        return len(result)
+    if isinstance(result, dict):
+        for key in ("rows", "messages", "hours"):
+            value = result.get(key)
+            if isinstance(value, list):
+                return len(value)
+        if "id" in result and "text" in result:
+            return 1
+    return 0

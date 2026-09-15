@@ -12,6 +12,7 @@
 	{
 		devShells.${system}.default = pkgs.mkShell {
 			buildInputs = [
+				pkgs.unzip
 				opencode.packages.${system}.default
 					pkgs.uv
 					pkgs.python3

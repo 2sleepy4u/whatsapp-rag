@@ -107,6 +107,7 @@ def ingest_file(
     sender_seen: set[str] = set()
     batch: list[tuple] = []
     final_stats = ParseStats()
+    message_total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 
     for msg, stats in parse_file(path, tz_name=tz):
         final_stats = stats
@@ -156,10 +157,12 @@ def ingest_file(
                 result.last_ts = msg.ts
 
         if len(batch) >= BATCH:
-            result.inserted += _flush(conn, batch)
+            inserted, message_total = _flush(conn, batch, message_total)
+            result.inserted += inserted
 
     if batch:
-        result.inserted += _flush(conn, batch)
+        inserted, message_total = _flush(conn, batch, message_total)
+        result.inserted += inserted
 
     result.total_lines = final_stats.lines
     result.continuations = final_stats.continuations
@@ -169,13 +172,17 @@ def ingest_file(
     return result
 
 
-def _flush(conn: sqlite3.Connection, batch: list[tuple]) -> int:
-    before = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+def _flush(conn: sqlite3.Connection, batch: list[tuple], previous_total: int) -> tuple[int, int]:
+    """Insert a batch and return (inserted, new_total).
+
+    ``INSERT OR IGNORE`` makes the exact inserted count necessary; we take a
+    single COUNT(*) instead of two to keep the O(n) scans down on large imports.
+    """
     conn.executemany(INSERT_SQL, batch)
     conn.commit()
-    after = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
     batch.clear()
-    return after - before
+    return total - previous_total, total
 
 
 def _finalize(conn: sqlite3.Connection, chat_id: str, result: IngestResult, run_id: int) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import typer
@@ -387,12 +388,18 @@ def index(
     batch: int = typer.Option(64, "--batch"),
     window_size: int = typer.Option(6, "--window-size"),
     window_stride: int = typer.Option(3, "--window-stride"),
+    window_mode: str = typer.Option(
+        "model", "--window-mode",
+        help="model = embed each window (best quality); mean = pool member message vectors (much faster)",
+    ),
     no_windows: bool = typer.Option(False, "--no-windows", help="Skip conversation-window vectors"),
     limit: int | None = typer.Option(None, "--limit", help="Cap items (for testing)"),
     recreate: bool = typer.Option(False, "--recreate", help="Drop and rebuild the collection"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be embedded"),
 ) -> None:
     """Embed messages (and conversation windows) into the Chroma vector store."""
+    if window_mode not in {"model", "mean"}:
+        raise typer.BadParameter("--window-mode must be model|mean")
     settings = load_settings()
     settings.ensure_dirs()
     model = model or settings.embed_model
@@ -417,9 +424,14 @@ def index(
             win_stats = index_windows(
                 conn, col, embedder, chat_id=chat, size=window_size, stride=window_stride,
                 batch_size=max(1, batch // 2), recreate=recreate, limit=limit,
-                progress=make_cb("Embedding windows"), dry_run=dry_run,
+                progress=make_cb("Embedding windows"), dry_run=dry_run, window_mode=window_mode,
             )
             _print_index_stats(win_stats, console)
+            if not dry_run and window_mode == "model" and win_stats.embedded:
+                console.print(
+                    "[dim]Tip: windows support --window-mode mean (pool message vectors), "
+                    "~30x faster and fine for clustering.[/]"
+                )
     except ConnectionError:
         console.print(_ollama_hint(settings.ollama_host))
         raise typer.Exit(code=1)
@@ -445,31 +457,78 @@ def _reporter(console: Console):
         TextColumn("{task.description}"),
         BarColumn(),
         MofNCompleteColumn(),
+        TextColumn("[cyan]{task.fields[rate]}[/]"),
+        TextColumn("[yellow]{task.fields[eta]}[/]"),
         console=console,
     )
-    state: dict = {}
+    state: dict[str, dict] = {}
 
     def make_cb(label: str):
-        def cb(done: int, total: int) -> None:
-            task = state.get(label)
-            if task is None:
-                task = progress.add_task(label, total=total)
-                state[label] = task
+        def cb(done: int, total: int, metrics: dict | None = None) -> None:
+            if total <= 0:
+                return
+            metrics = metrics or {}
+            info = state.get(label)
+            if info is None:
+                info = {"task": progress.add_task(label, total=total, rate="", eta=""), "started": time.time()}
+                state[label] = info
                 progress.start()
-            progress.update(task, completed=done)
+
+            elapsed = max(1e-6, time.time() - info["started"])
+            item_rate = done / elapsed
+            embed_seconds = metrics.get("embed_seconds", 0.0) or 0.0
+            embed_total = metrics.get("embedded", 0)
+            unit = metrics.get("unit", "emb")
+
+            parts = [f"{item_rate:,.0f} it/s"]
+            if embed_seconds > 0 and embed_total:
+                parts.append(f"{embed_total / embed_seconds:,.0f} {unit}/s")
+            rate = " · ".join(parts)
+
+            if done >= total:
+                eta = "done"
+            elif done <= 0 or elapsed < 0.5:
+                eta = "ETA …"
+            else:
+                eta = f"ETA {_fmt_duration((total - done) / item_rate)}"
+            progress.update(info["task"], completed=done, rate=rate, eta=eta)
 
         return cb
 
     return progress, make_cb
 
 
+def _fmt_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{sec:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
 def _print_index_stats(stats, console: Console) -> None:
     verb = "to embed" if stats.dry_run else "embedded"
-    console.print(
+    line = (
         f"  [bold]{stats.kind}[/]: total={stats.total:,} {verb}={stats.pending if stats.dry_run else stats.embedded:,} "
         f"skipped={stats.skipped:,} dim={stats.dim} batches={stats.batches} "
         f"in {stats.elapsed:.1f}s"
     )
+    console.print(line)
+    if not stats.dry_run and (stats.embed_calls or stats.embedded):
+        if stats.embed_calls:
+            dedup = stats.pending / stats.embed_texts if stats.embed_texts else 0
+            emb_rate = stats.embed_texts / stats.embed_seconds if stats.embed_seconds else 0
+            detail = (
+                f"embed calls={stats.embed_calls} texts={stats.embed_texts:,} "
+                f"(dedup {dedup:.1f}x, {emb_rate:,.0f} emb/s) embed={stats.embed_seconds:.1f}s"
+            )
+        else:
+            pool_rate = stats.embedded / stats.embed_seconds if stats.embed_seconds else 0
+            detail = f"pooled from messages={stats.embed_seconds:.1f}s ({pool_rate:,.0f} win/s)"
+        console.print(f"    [dim]{detail} store={stats.flush_seconds:.1f}s[/]")
 
 
 @app.command()
@@ -521,6 +580,33 @@ def search(
     console.print(table)
 
 
+class _AskStream:
+    """Renders agent tokens and tool activity as they happen (no waiting)."""
+
+    def __init__(self, console: Console, show_steps: bool) -> None:
+        self.console = console
+        self.show_steps = show_steps
+        self.wrote = False
+
+    def event(self, kind: str, payload: dict) -> None:
+        if kind == "step_start" and self.show_steps:
+            self.console.print(f"[dim]· step {payload['step']}/{payload['max_steps']}[/]")
+        elif kind == "tool_call":
+            args = ", ".join(f"{k}={_short(v)}" for k, v in payload["arguments"].items())
+            self.console.print(f"[cyan]→ {payload['name']}({args})[/]")
+        elif kind == "tool_result":
+            self.console.print(f"[dim]  ← {payload['count']} result(s)[/]")
+
+    def token(self, text: str) -> None:
+        self.console.print(text, end="", markup=False, highlight=False)
+        self.wrote = True
+
+
+def _short(value: object, limit: int = 60) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 @app.command()
 def ask(
     question: list[str] = typer.Argument(None, help="Question; omit to enter interactive mode"),
@@ -536,11 +622,12 @@ def ask(
     )
 
     def once(text: str) -> None:
+        stream = _AskStream(console, show_steps)
         try:
-            with console.status("[bold]Thinking...[/]"):
-                ans = answer_question(
-                    settings, text, max_steps=max_steps, system_extra=system_extra
-                )
+            ans = answer_question(
+                settings, text, max_steps=max_steps, system_extra=system_extra,
+                on_event=stream.event, on_token=stream.token,
+            )
         except ConnectionError:
             console.print(_ollama_hint(settings.ollama_host))
             raise typer.Exit(code=1)
@@ -548,7 +635,9 @@ def ask(
             console.print(f"[red]Ollama error:[/] {exc}")
             console.print(f"Try: [bold]ollama pull {settings.llm_model}[/]")
             raise typer.Exit(code=1)
-        _render_answer(ans, settings, show_sources=sources, show_steps=show_steps)
+        if stream.wrote:
+            console.print()
+        _render_answer(ans, settings, show_sources=sources, show_steps=show_steps, show_answer=not stream.wrote)
 
     if question:
         once(" ".join(question))
@@ -567,8 +656,9 @@ def ask(
         once(text)
 
 
-def _render_answer(ans, settings, show_sources: bool = True, show_steps: bool = False) -> None:
-    console.print(Panel(Markdown(ans.answer or "_(nessuna risposta)_"), title="Answer", border_style="cyan"))
+def _render_answer(ans, settings, show_sources: bool = True, show_steps: bool = False, show_answer: bool = True) -> None:
+    if show_answer:
+        console.print(Panel(Markdown(ans.answer or "_(nessuna risposta)_"), title="Answer", border_style="cyan"))
 
     if show_steps and ans.steps:
         stable = Table(title="Tool calls")

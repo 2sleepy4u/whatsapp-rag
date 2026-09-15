@@ -16,6 +16,15 @@ class FakeLLM:
         return AssistantTurn(content="fallback", tool_calls=[])
 
 
+class FakeStreamingLLM(FakeLLM):
+    def stream_chat(self, messages, tools, on_token=None):
+        turn = self.chat(messages, tools)
+        if on_token and turn.content:
+            for word in turn.content.split(" "):
+                on_token(word + " ")
+        return turn
+
+
 def test_agent_executes_tool_then_answers(ctx):
     target_id = f"{3:016x}"
     llm = FakeLLM(
@@ -37,6 +46,29 @@ def test_agent_forced_final_after_max_steps(ctx):
     assert result.answer == "Insight senza strumenti."
     # The final call must be made with tools disabled.
     assert llm.calls[-1]["tools"] is None
+
+
+def test_agent_streams_tokens_and_emits_events(ctx):
+    target_id = f"{3:016x}"
+    llm = FakeStreamingLLM(
+        [
+            AssistantTurn(content=None, tool_calls=[ToolCall("keyword_search", {"query": "dimenticare"})]),
+            AssistantTurn(content=f"Te lo dice Alice [{target_id}].", tool_calls=[]),
+        ]
+    )
+    tokens: list[str] = []
+    events: list[tuple[str, dict]] = []
+    result = run_agent(
+        "cosa mi ha detto Alice?",
+        ctx,
+        llm,
+        on_token=tokens.append,
+        on_event=lambda kind, payload: events.append((kind, payload)),
+    )
+    assert "".join(tokens).strip() == result.answer.strip()
+    kinds = [kind for kind, _ in events]
+    assert "tool_call" in kinds and "tool_result" in kinds
+    assert any(p["name"] == "keyword_search" for k, p in events if k == "tool_call")
 
 
 def test_extract_ids():

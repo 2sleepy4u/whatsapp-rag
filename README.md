@@ -40,13 +40,17 @@ uv run chat-rag stats volume --bucket month
 ollama pull bge-m3          # multilingual embeddings
 uv run chat-rag index --dry-run          # report what would be embedded
 uv run chat-rag index                    # embed messages + conversation windows
+uv run chat-rag index --window-mode mean # windows = pooled message vectors (much faster)
 uv run chat-rag index --recreate         # drop and rebuild the collection
 uv run chat-rag search "vacanza in Spagna" --top 10
 ```
 
-Indexing is incremental: re-running only embeds new or changed messages. Both a
-`message` vector per message and sliding `window` vectors (for topic clustering)
-are stored in `data/chroma`.
+Indexing is incremental: re-running only embeds new or changed messages, and
+identical texts are embedded once and reused (chat messages repeat a lot).
+`--window-mode model` encodes each window with the embedding model (best
+quality); `--window-mode mean` averages the member message vectors instead,
+which is roughly two orders of magnitude faster and is plenty for clustering.
+The progress bar shows items/s, embedding throughput and an ETA.
 
 ### Ask (v1)
 
@@ -62,6 +66,10 @@ uv run chat-rag expand <id> --context 3  # full quote with surrounding messages
 The model decides dynamically which tools to use (semantic search, keyword/FTS,
 statistics, surrounding context) and every answer cites real message ids as
 `[id]`; the CLI resolves them to snippets and lets you expand the full quote.
+Answers stream token-by-token and tool calls are printed as they run, so you
+see progress instead of a silent spinner. `Ollama` generation is capped with
+`CHAT_RAG_LLM_NUM_PREDICT` and thinking models (qwen3) can be quieted with
+`CHAT_RAG_LLM_THINK=0`.
 
 Data lives under `./data/` (gitignored).
 
@@ -69,4 +77,6 @@ Data lives under `./data/` (gitignored).
 
 ```bash
 uv run pytest
+uv run python scripts/gen_mock_export.py --messages 178000   # synthetic export -> data/exports/
+uv run python scripts/bench_embed.py --model bge-m3          # embedding throughput benchmark
 ```
