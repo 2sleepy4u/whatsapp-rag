@@ -835,5 +835,19 @@ def timeline(
     conn.close()
 
 
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+) -> None:
+    """Run the local web UI (http://127.0.0.1:8000). Private data stays local."""
+    import uvicorn
+
+    from .server.app import create_app
+
+    settings = load_settings()
+    uvicorn.run(create_app(settings), host=host, port=port)
+
+
 if __name__ == "__main__":
     app()

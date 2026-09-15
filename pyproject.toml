@@ -12,13 +12,18 @@ dependencies = [
     "chromadb>=1.5.9",
     "ollama>=0.6.2",
     "scikit-learn>=1.9.1",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.53.0",
 ]
 
 [project.scripts]
 chat-rag = "chat_rag.cli:app"
 
 [dependency-groups]
-dev = ["pytest>=8.2"]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.2",
+]
 
 [build-system]
 requires = ["hatchling"]

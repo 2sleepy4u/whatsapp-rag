@@ -14,7 +14,7 @@ citations back to the original messages.
 - [x] Phase 3 — embeddings + vector store (Chroma)
 - [x] Phase 4 — RAG agent with citations (v1)
 - [x] Phase 5 — clustering / inside-joke discovery
-- [ ] Phase 6 — local web UI
+- [x] Phase 6 — local web UI
 - [ ] Phase 7 — voice-note transcription
 - [ ] Phase 8 — NixOS desktop deployment
 
@@ -87,6 +87,19 @@ date span and main users. All three are also exposed to the agent as
 `topic_clusters`, `inside_joke_candidates` and `phrase_timeline`.
 
 Data lives under `./data/` (gitignored).
+
+### Web UI
+
+```bash
+uv run chat-rag serve                 # http://127.0.0.1:8000
+uv run chat-rag serve --port 8080
+```
+
+A single-page UI (no build step): pick a chat, ask, and watch the answer stream
+token-by-token while tool calls are logged. Citations are shown underneath and
+each one can be expanded to the surrounding messages. It binds to `127.0.0.1`
+by default — there is no auth, so keep it local. The same logic is available
+programmatically via `POST /api/ask` and `GET /api/ask/stream` (SSE).
 
 ## Development
 
