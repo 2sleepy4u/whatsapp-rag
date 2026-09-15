@@ -30,6 +30,8 @@ from .ingest.parser_android import ParseStats, parse_file
 from .rag.citations import get_message
 from .rag.service import answer_question, build_context
 from .rag.tools import ToolContext, get_context
+from .transcribe.base import build_engine
+from .transcribe.pipeline import media_search_roots, transcribe_pending, voice_messages
 
 app = typer.Typer(help="Local RAG + analytics over exported WhatsApp chats.", no_args_is_help=True)
 stats_app = typer.Typer(help="Statistics over ingested chats.", no_args_is_help=True)
@@ -847,6 +849,77 @@ def serve(
 
     settings = load_settings()
     uvicorn.run(create_app(settings), host=host, port=port)
+
+
+@app.command()
+def transcribe(
+    chat: str | None = typer.Option(None, "--chat"),
+    exports: list[Path] = typer.Option(None, "--exports", help="Extra folder(s) to search for media"),
+    engine: str = typer.Option("auto", "--engine", help="auto|faster-whisper|whisper.cpp"),
+    model: str | None = typer.Option(None, "--model", help="faster-whisper model (tiny|base|small|medium|large-v3)"),
+    limit: int | None = typer.Option(None, "--limit", help="Only process N voice notes"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what can/cannot be transcribed"),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Re-transcribe already done notes"),
+    keep_placeholder: bool = typer.Option(False, "--keep-placeholder", help="Do not replace messages.text"),
+) -> None:
+    """Transcribe voice notes locally and make them searchable."""
+    settings = load_settings()
+    conn = open_db(settings.db_path)
+    roots = media_search_roots(conn, list(exports or []))
+
+    if dry_run:
+        stats = transcribe_pending(conn, None, roots, chat_id=chat, limit=limit, dry_run=True)
+        _print_transcribe_stats(stats, console, roots)
+        conn.close()
+        return
+
+    try:
+        eng = build_engine(settings, engine=engine, model=model)
+    except (RuntimeError, FileNotFoundError) as exc:
+        console.print(f"[red]{exc}[/]")
+        if engine in {"auto", "faster-whisper"}:
+            console.print("[dim]Install the CPU engine with: uv sync --extra voice[/]")
+            console.print(
+                "[dim]Or build whisper.cpp with Vulkan and set "
+                "CHAT_RAG_WHISPER_CPP_BIN / CHAT_RAG_WHISPER_CPP_MODEL.[/]"
+            )
+        raise typer.Exit(code=1)
+
+    progress = Progress(SpinnerColumn(), TextColumn("{task.description}"),
+                        BarColumn(), MofNCompleteColumn(), console=console)
+    task = progress.add_task(f"Transcribing ({eng.name}/{eng.model})", total=0)
+    progress.start()
+
+    def cb(i: int, total: int, label: str) -> None:
+        progress.update(task, total=total, completed=i - 1, description=f"Transcribing ({label[:40]})")
+
+    try:
+        stats = transcribe_pending(
+            conn, eng, roots, chat_id=chat, limit=limit,
+            apply_to_messages=not keep_placeholder, overwrite=overwrite, on_progress=cb,
+        )
+    finally:
+        progress.stop()
+
+    _print_transcribe_stats(stats, console, roots)
+    if stats.transcribed and not keep_placeholder:
+        console.print(
+            "[dim]Tip: run `chat-rag index` so the new transcripts are embedded for search.[/]"
+        )
+    conn.close()
+
+
+def _print_transcribe_stats(stats, console: Console, roots: list[Path]) -> None:
+    verb = "transcribable" if stats.dry_run else "transcribed"
+    console.print(
+        f"engine={stats.engine or '-'} model={stats.model or '-'} "
+        f"total={stats.total:,} {verb}={stats.transcribed:,} skipped={stats.skipped:,} "
+        f"missing={stats.missing:,} failed={stats.failed:,} in {stats.elapsed:.1f}s"
+    )
+    if stats.dry_run:
+        console.print("[dim]media search roots: " + ", ".join(str(r) for r in roots) + "[/]")
+    for mid, err in stats.errors[:10]:
+        console.print(f"  [red]{mid}[/]: {err}")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,9 @@ dependencies = [
 [project.scripts]
 chat-rag = "chat_rag.cli:app"
 
+[project.optional-dependencies]
+voice = ["faster-whisper>=1.0"]
+
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",

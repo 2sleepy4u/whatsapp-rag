@@ -24,6 +24,13 @@ class Settings:
     embed_model: str
     llm_num_predict: int
     llm_think: bool
+    transcribe_engine: str = "auto"
+    whisper_model: str = "small"
+    whisper_language: str = "it"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
+    whisper_cpp_bin: str | None = None
+    whisper_cpp_model: str | None = None
 
     @property
     def exports_dir(self) -> Path:
@@ -51,4 +58,11 @@ def load_settings() -> Settings:
         embed_model=_env("EMBED_MODEL", "bge-m3"),
         llm_num_predict=int(_env("LLM_NUM_PREDICT", "1024")),
         llm_think=_env_bool("LLM_THINK", False),
+        transcribe_engine=_env("TRANSCRIBE_ENGINE", "auto"),
+        whisper_model=_env("WHISPER_MODEL", "small"),
+        whisper_language=_env("WHISPER_LANGUAGE", "it"),
+        whisper_device=_env("WHISPER_DEVICE", "cpu"),
+        whisper_compute_type=_env("WHISPER_COMPUTE_TYPE", "int8"),
+        whisper_cpp_bin=_env("WHISPER_CPP_BIN", "") or None,
+        whisper_cpp_model=_env("WHISPER_CPP_MODEL", "") or None,
     )

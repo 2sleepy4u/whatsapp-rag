@@ -15,7 +15,7 @@ citations back to the original messages.
 - [x] Phase 4 — RAG agent with citations (v1)
 - [x] Phase 5 — clustering / inside-joke discovery
 - [x] Phase 6 — local web UI
-- [ ] Phase 7 — voice-note transcription
+- [x] Phase 7 — voice-note transcription
 - [ ] Phase 8 — NixOS desktop deployment
 
 ## Usage
@@ -100,6 +100,36 @@ token-by-token while tool calls are logged. Citations are shown underneath and
 each one can be expanded to the surrounding messages. It binds to `127.0.0.1`
 by default — there is no auth, so keep it local. The same logic is available
 programmatically via `POST /api/ask` and `GET /api/ask/stream` (SSE).
+
+### Voice notes (transcription)
+
+Only works when your export includes the media files (not `<Media omessi>`).
+
+```bash
+# CPU: faster-whisper
+uv sync --extra voice
+uv run chat-rag transcribe --dry-run          # what can/cannot be found
+uv run chat-rag transcribe --model small      # transcribe + make searchable
+uv run chat-rag index                         # embed the new transcripts
+
+# GPU: whisper.cpp built with Vulkan (see below)
+export CHAT_RAG_WHISPER_CPP_BIN=/path/to/whisper-cli
+export CHAT_RAG_WHISPER_CPP_MODEL=/path/to/ggml-medium.bin
+uv run chat-rag transcribe --engine whisper.cpp
+```
+
+Transcripts are stored in the `transcripts` table and (by default) replace the
+placeholder `messages.text`, so voice notes become searchable and citable just
+like text. Use `--keep-placeholder` to keep the original placeholder.
+
+**Which engine?** On the RX 6650 XT, whisper.cpp + Vulkan is usually several
+times faster than CPU; `faster-whisper small/medium` int8 on the i5-12400 is a
+solid fallback. Benchmark both on your own files before a bulk run:
+
+```bash
+uv run python scripts/bench_transcribe.py --dir data/exports --limit 5 \
+  --cpp-bin /path/to/whisper-cli --cpp-model /path/to/ggml-medium.bin
+```
 
 ## Development
 

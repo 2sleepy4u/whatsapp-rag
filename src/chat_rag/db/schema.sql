@@ -93,3 +93,17 @@ CREATE TABLE IF NOT EXISTS embedding_index (
 
 CREATE INDEX IF NOT EXISTS idx_embed_kind ON embedding_index(collection, kind);
 
+CREATE TABLE IF NOT EXISTS transcripts (
+    message_id   TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    media_file   TEXT,
+    engine       TEXT NOT NULL,
+    model        TEXT NOT NULL,
+    language     TEXT,
+    duration_sec REAL,
+    text         TEXT NOT NULL,
+    created_at   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_transcripts_engine ON transcripts(engine, model);
+
+
