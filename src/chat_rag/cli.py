@@ -3,8 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
+from ollama import ResponseError
 from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+from rich.prompt import Prompt
 from rich.table import Table
 
 from .config import load_settings
@@ -20,6 +24,9 @@ from .embed.index import (
 from .embed.ollama_embed import OllamaEmbedder
 from .ingest.loader import ingest_file
 from .ingest.parser_android import ParseStats, parse_file
+from .rag.citations import get_message
+from .rag.service import answer_question
+from .rag.tools import ToolContext, get_context
 
 app = typer.Typer(help="Local RAG + analytics over exported WhatsApp chats.", no_args_is_help=True)
 stats_app = typer.Typer(help="Statistics over ingested chats.", no_args_is_help=True)
@@ -512,6 +519,114 @@ def search(
                       meta.get("sender_name", ""), doc)
         _ = mid
     console.print(table)
+
+
+@app.command()
+def ask(
+    question: list[str] = typer.Argument(None, help="Question; omit to enter interactive mode"),
+    chat: str | None = typer.Option(None, "--chat", help="Restrict to one chat_id"),
+    max_steps: int = typer.Option(6, "--max-steps"),
+    sources: bool = typer.Option(True, "--sources/--no-sources"),
+    show_steps: bool = typer.Option(False, "--show-steps", help="Show tool calls"),
+) -> None:
+    """Ask a question in natural language; answers carry [id] citations."""
+    settings = load_settings()
+    system_extra = (
+        f"Restrict every tool call to chat_id = {chat!r}." if chat else None
+    )
+
+    def once(text: str) -> None:
+        try:
+            with console.status("[bold]Thinking...[/]"):
+                ans = answer_question(
+                    settings, text, max_steps=max_steps, system_extra=system_extra
+                )
+        except ConnectionError:
+            console.print(_ollama_hint(settings.ollama_host))
+            raise typer.Exit(code=1)
+        except ResponseError as exc:
+            console.print(f"[red]Ollama error:[/] {exc}")
+            console.print(f"Try: [bold]ollama pull {settings.llm_model}[/]")
+            raise typer.Exit(code=1)
+        _render_answer(ans, settings, show_sources=sources, show_steps=show_steps)
+
+    if question:
+        once(" ".join(question))
+        return
+
+    console.print(
+        "[dim]Interactive mode. Type a question, or 'exit' to quit.[/]"
+    )
+    while True:
+        try:
+            text = Prompt.ask("\n[bold cyan]ask[/]")
+        except (EOFError, KeyboardInterrupt):
+            break
+        if text.strip().lower() in {"exit", "quit", ""}:
+            break
+        once(text)
+
+
+def _render_answer(ans, settings, show_sources: bool = True, show_steps: bool = False) -> None:
+    console.print(Panel(Markdown(ans.answer or "_(nessuna risposta)_"), title="Answer", border_style="cyan"))
+
+    if show_steps and ans.steps:
+        stable = Table(title="Tool calls")
+        stable.add_column("tool")
+        stable.add_column("arguments", overflow="fold")
+        for step in ans.steps:
+            args = ", ".join(f"{k}={v}" for k, v in step["arguments"].items())
+            stable.add_row(step["tool"], args)
+        console.print(stable)
+
+    if show_sources and ans.citations:
+        table = Table(title="Citations")
+        table.add_column("id", style="dim")
+        table.add_column("date")
+        table.add_column("who")
+        table.add_column("message", overflow="fold")
+        any_missing = False
+        for c in ans.citations:
+            if not c.found:
+                any_missing = True
+                table.add_row(c.id, "?", "", "[red]not found[/]")
+                continue
+            snippet = c.text.replace("\n", " ")[:120]
+            table.add_row(c.id, c.date, c.sender, snippet)
+        console.print(table)
+        console.print("[dim]Expand a quote: chat-rag expand <id>  ·  with context: --context 3[/]")
+        if any_missing:
+            console.print("[yellow]Some cited ids were not found — the answer may contain invented ids.[/]")
+
+
+@app.command()
+def expand(
+    message_id: str = typer.Argument(..., help="Message id shown in a citation"),
+    context: int = typer.Option(0, "--context", "-c", help="Show N messages before and after"),
+) -> None:
+    """Show the full text of a cited message (optionally with surrounding context)."""
+    settings = load_settings()
+    conn = open_db(settings.db_path)
+
+    if context <= 0:
+        cit = get_message(conn, message_id)
+        if cit is None:
+            console.print(f"[red]No message with id {message_id}[/]")
+            raise typer.Exit(code=1)
+        console.print(f"[bold]{cit.date} {cit.time} — {cit.sender}[/]")
+        console.print(cit.text)
+        conn.close()
+        return
+
+    data = get_context(ToolContext(conn=conn, collection=None, embedder=None), message_id, before=context, after=context)
+    if "error" in data:
+        console.print(f"[red]{data['error']}[/]")
+        raise typer.Exit(code=1)
+    for m in data["messages"]:
+        marker = "[cyan]>>[/]" if m["id"] == message_id else "  "
+        console.print(f"{marker} [dim]{m['date']} {m['time']} {m['sender']} ({m['id']})[/]")
+        console.print(f"   {m['text']}")
+    conn.close()
 
 
 if __name__ == "__main__":

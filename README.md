@@ -12,7 +12,7 @@ citations back to the original messages.
 - [x] Phase 1 — parser + SQLite + FTS5
 - [x] Phase 2 — statistics engine + CLI
 - [x] Phase 3 — embeddings + vector store (Chroma)
-- [ ] Phase 4 — RAG agent with citations (v1)
+- [x] Phase 4 — RAG agent with citations (v1)
 - [ ] Phase 5 — clustering / inside-joke discovery
 - [ ] Phase 6 — local web UI
 - [ ] Phase 7 — voice-note transcription
@@ -47,6 +47,21 @@ uv run chat-rag search "vacanza in Spagna" --top 10
 Indexing is incremental: re-running only embeds new or changed messages. Both a
 `message` vector per message and sliding `window` vectors (for topic clustering)
 are stored in `data/chroma`.
+
+### Ask (v1)
+
+```bash
+ollama pull qwen2.5:7b
+uv run chat-rag ask "Quanti messaggi ha inviato Marco nel 2024?"
+uv run chat-rag ask "Cosa ci siamo detti sulla vacanza in Spagna?"
+uv run chat-rag ask                      # interactive mode
+uv run chat-rag ask "..." --show-steps   # show which tools the model called
+uv run chat-rag expand <id> --context 3  # full quote with surrounding messages
+```
+
+The model decides dynamically which tools to use (semantic search, keyword/FTS,
+statistics, surrounding context) and every answer cites real message ids as
+`[id]`; the CLI resolves them to snippets and lets you expand the full quote.
 
 Data lives under `./data/` (gitignored).
 
