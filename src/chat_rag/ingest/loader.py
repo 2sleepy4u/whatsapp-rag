@@ -182,14 +182,21 @@ def _finalize(conn: sqlite3.Connection, chat_id: str, result: IngestResult, run_
     conn.execute(
         """
         UPDATE chats SET
-            is_group = (SELECT COUNT(DISTINCT sender_id) FROM messages
-                        WHERE chat_id = ? AND sender_id IS NOT NULL) > 2,
+            is_group = (
+                (SELECT COUNT(DISTINCT sender_id) FROM messages
+                 WHERE chat_id = ? AND sender_id IS NOT NULL) > 2
+                OR EXISTS (
+                    SELECT 1 FROM messages
+                    WHERE chat_id = ? AND msg_type = 'system'
+                      AND (lower(text) LIKE '%gruppo%' OR lower(text) LIKE '%group%')
+                )
+            ),
             first_ts = (SELECT MIN(ts) FROM messages WHERE chat_id = ?),
             last_ts  = (SELECT MAX(ts) FROM messages WHERE chat_id = ?),
             message_count = (SELECT COUNT(*) FROM messages WHERE chat_id = ?)
         WHERE chat_id = ?
         """,
-        (chat_id, chat_id, chat_id, chat_id, chat_id),
+        (chat_id, chat_id, chat_id, chat_id, chat_id, chat_id),
     )
     conn.execute(
         """

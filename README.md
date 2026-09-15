@@ -10,7 +10,7 @@ citations back to the original messages.
 
 - [x] Phase 0 — tooling (`uv`, Python 3.12)
 - [x] Phase 1 — parser + SQLite + FTS5
-- [ ] Phase 2 — statistics engine + CLI
+- [x] Phase 2 — statistics engine + CLI
 - [ ] Phase 3 — embeddings + vector store
 - [ ] Phase 4 — RAG agent with citations (v1)
 - [ ] Phase 5 — clustering / inside-joke discovery
@@ -24,6 +24,14 @@ citations back to the original messages.
 uv sync
 uv run chat-rag import "/path/to/WhatsApp Chat with Marco.txt"
 uv run chat-rag info
+uv run chat-rag preview "/path/to/WhatsApp Chat with Marco.txt"   # dry-run, no DB writes
+uv run chat-rag stats per-sender --chat "Marco"
+uv run chat-rag stats response-time --from 2024-01-01 --to 2024-12-31
+uv run chat-rag stats words --top 50
+uv run chat-rag stats emojis
+uv run chat-rag stats sessions --gap 3600
+uv run chat-rag stats time-of-day
+uv run chat-rag stats volume --bucket month
 ```
 
 Data lives under `./data/` (gitignored).

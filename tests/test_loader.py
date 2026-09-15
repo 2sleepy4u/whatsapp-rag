@@ -45,3 +45,17 @@ def test_fts_search(tmp_path):
         "WHERE messages_fts MATCH 'bene' ORDER BY rank"
     ).fetchall()
     assert any("Tutto bene" in r["text"] for r in rows)
+
+
+def test_group_detected_from_creation_notice(tmp_path):
+    export = tmp_path / "group.txt"
+    export.write_text(
+        "12/09/24, 08:41 - Luca ha creato il gruppo \"Weekend\"\n"
+        "12/09/24, 08:42 - Luca: ciao\n"
+        "12/09/24, 08:43 - Giulia: ehi\n",
+        encoding="utf-8",
+    )
+    conn = open_db(tmp_path / "chat.db")
+    ingest_file(conn, export, chat_id="group", tz="Europe/Rome")
+    chat = conn.execute("SELECT is_group FROM chats WHERE chat_id='group'").fetchone()
+    assert chat["is_group"] == 1
