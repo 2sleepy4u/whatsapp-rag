@@ -14,7 +14,7 @@ from rich.table import Table
 
 from .config import load_settings
 from .analytics import inside_jokes
-from .analytics.clustering import analyze_topics
+from .analytics.clustering import DEFAULT_MAX_WINDOWS, analyze_topics
 from .db import stats as stats_mod
 from .db.db import open_db
 from .embed.index import (
@@ -732,6 +732,10 @@ def topics(
     top_terms: int = typer.Option(8, "--top-terms"),
     examples: int = typer.Option(3, "--examples", help="Example messages per topic"),
     evolution: str | None = typer.Option(None, "--evolution", help="month|year: show topic activity over time"),
+    max_windows: int = typer.Option(
+        DEFAULT_MAX_WINDOWS, "--max-windows",
+        help="Cap how many windows are clustered (0 = no cap)",
+    ),
 ) -> None:
     """Cluster conversation windows into topics and show their distinctive terms."""
     settings = load_settings()
@@ -740,12 +744,17 @@ def topics(
         result, evo = analyze_topics(
             ctx.collection, chat, date_from, date_to,
             min_cluster_size=min_size, top_terms=top_terms, top_examples=examples,
-            evolution_bucket=evolution,
+            evolution_bucket=evolution, max_windows=max_windows or None,
         )
     console.print(
         f"[bold]{len(result.clusters)}[/] topics from {result.total:,} windows "
         f"({result.noise:,} unclustered, {result.noise_ratio * 100:.0f}% noise)"
     )
+    if result.available > result.total:
+        console.print(
+            f"[yellow]Note:[/] sampled {result.total:,} of {result.available:,} windows "
+            f"(raise --max-windows to cluster more)."
+        )
     table = Table(title="Topics")
     table.add_column("size", justify="right")
     table.add_column("label")

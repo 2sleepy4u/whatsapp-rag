@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from chat_rag.analytics import clustering
 from chat_rag.analytics.clustering import analyze_topics, cluster_records, fetch_window_records
 from chat_rag.embed.index import chroma_client, ensure_collection
 
@@ -84,3 +85,45 @@ def test_fetch_filters_by_chat(tmp_path):
     )
     assert fetch_window_records(col, chat_id="b") == []
     assert len(fetch_window_records(col, chat_id="a")) == 7
+
+
+def test_fetch_pages_and_excludes_messages(tmp_path, monkeypatch):
+    # Force many small pages to prove offset paging is exercised.
+    monkeypatch.setattr(clustering, "_PAGE_SIZE", 2)
+    client = chroma_client(tmp_path / "chroma")
+    col = ensure_collection(client, "messages")
+    recs = _records()
+    col.add(
+        ids=[r["id"] for r in recs],
+        embeddings=[r["embedding"] for r in recs],
+        documents=[r["text"] for r in recs],
+        metadatas=[{"kind": "window", "chat_id": "c", **r["meta"]} for r in recs],
+    )
+    # A message vector in the same collection must never be fetched.
+    col.add(
+        ids=["m1"],
+        embeddings=[[1.0] + [0.0] * (DIM - 1)],
+        documents=["ciao"],
+        metadatas=[{"kind": "message", "chat_id": "c"}],
+    )
+
+    records = fetch_window_records(col, chat_id="c")
+    assert len(records) == 7
+    assert all(r["meta"]["kind"] == "window" for r in records)
+
+
+def test_analyze_topics_subsamples_over_cap(tmp_path):
+    client = chroma_client(tmp_path / "chroma")
+    col = ensure_collection(client, "messages")
+    recs = _records()
+    col.add(
+        ids=[r["id"] for r in recs],
+        embeddings=[r["embedding"] for r in recs],
+        documents=[r["text"] for r in recs],
+        metadatas=[{"kind": "window", "chat_id": "c", **r["meta"]} for r in recs],
+    )
+
+    result, _ = analyze_topics(col, chat_id="c", min_cluster_size=2, max_windows=3)
+    assert result.available == 7
+    assert result.total == 3
+    assert len(result.labels) == 3

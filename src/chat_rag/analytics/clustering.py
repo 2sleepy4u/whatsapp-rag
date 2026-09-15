@@ -12,6 +12,7 @@ with HDBSCAN, then describe every cluster by its most distinctive terms
 from __future__ import annotations
 
 import math
+import random
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -21,6 +22,12 @@ import numpy as np
 from ..db.stats import ITALIAN_STOPWORDS
 
 _WORD_RE = re.compile(r"[0-9a-zàáèéìíòóùúâêîôûäëïöüç']+", re.IGNORECASE)
+
+# Chroma materialises every requested id in one SQL query, so an unfiltered
+# ``get`` on a large collection fails with "too many SQL variables". Fetch
+# windows in pages and refuse to cluster an unbounded number of vectors.
+_PAGE_SIZE = 2000
+DEFAULT_MAX_WINDOWS = 20_000
 
 
 @dataclass
@@ -51,6 +58,7 @@ class ClusteringResult:
     total: int
     noise: int
     labels: list[int] = field(default_factory=list)
+    available: int = 0
 
     @property
     def noise_ratio(self) -> float:
@@ -177,42 +185,79 @@ def cluster_records(
 
 def fetch_window_records(collection, chat_id: str | None = None,
                          date_from: str | None = None, date_to: str | None = None) -> list[dict]:
-    data = collection.get(include=["embeddings", "documents", "metadatas"])
-    ids = data.get("ids") or []
-    embeddings = data.get("embeddings")
-    documents = data.get("documents") or []
-    metadatas = data.get("metadatas") or []
-    if embeddings is None:
-        return []
+    """Fetch window vectors from Chroma, filtered and paged.
+
+    Chroma applies the kind/chat metadata filter and results are read in
+    bounded pages, so we never pull message vectors or whole other chats and
+    never hit SQLite's variable limit on large collections. Date bounds are
+    applied in Python: Chroma's ``$gte``/``$lte`` only accept numeric operands,
+    and window dates are stored as ``YYYY-MM-DD`` strings.
+    """
+    clauses: list[dict] = [{"kind": "window"}]
+    if chat_id:
+        clauses.append({"chat_id": chat_id})
+    where = clauses[0] if len(clauses) == 1 else {"$and": clauses}
 
     records: list[dict] = []
-    for i, mid in enumerate(ids):
-        meta = metadatas[i] or {}
-        if meta.get("kind") != "window":
-            continue
-        if chat_id and meta.get("chat_id") != chat_id:
-            continue
-        start = meta.get("start_date", "")
-        if date_from and start and start < date_from:
-            continue
-        if date_to and start and start > date_to:
-            continue
-        records.append(
-            {
-                "id": mid,
-                "text": documents[i] or "",
-                "embedding": list(embeddings[i]),
-                "meta": meta,
-            }
+    offset = 0
+    while True:
+        data = collection.get(
+            where=where,
+            limit=_PAGE_SIZE,
+            offset=offset,
+            include=["embeddings", "documents", "metadatas"],
         )
+        ids = data.get("ids") or []
+        if not ids:
+            break
+        embeddings = data.get("embeddings")
+        if embeddings is None:
+            break
+        documents = data.get("documents") or []
+        metadatas = data.get("metadatas") or []
+
+        for i, mid in enumerate(ids):
+            meta = metadatas[i] or {}
+            # Chroma does the filtering now; these guards keep the function
+            # correct if a caller passes metadata that predates the filter.
+            if meta.get("kind") != "window":
+                continue
+            if chat_id and meta.get("chat_id") != chat_id:
+                continue
+            start = meta.get("start_date", "")
+            if date_from and start and start < date_from:
+                continue
+            if date_to and start and start > date_to:
+                continue
+            records.append(
+                {
+                    "id": mid,
+                    "text": documents[i] or "",
+                    "embedding": list(embeddings[i]),
+                    "meta": meta,
+                }
+            )
+
+        offset += len(ids)
+        if len(ids) < _PAGE_SIZE:
+            break
     return records
+
+
+def _subsample(records: list[dict], max_windows: int | None) -> tuple[list[dict], int]:
+    """Cap the number of windows fed to PCA/HDBSCAN; returns (records, available)."""
+    available = len(records)
+    if max_windows and max_windows > 0 and available > max_windows:
+        records = random.Random(42).sample(records, max_windows)
+    return records, available
 
 
 def topic_clusters(collection, chat_id: str | None = None,
                    date_from: str | None = None, date_to: str | None = None,
                    min_cluster_size: int = 5, top_terms: int = 8,
-                   top_examples: int = 3, reduce_dim: int = 48) -> ClusteringResult:
-    records = fetch_window_records(collection, chat_id, date_from, date_to)
+                   top_examples: int = 3, reduce_dim: int = 48,
+                   max_windows: int | None = DEFAULT_MAX_WINDOWS) -> ClusteringResult:
+    records, _ = _subsample(fetch_window_records(collection, chat_id, date_from, date_to), max_windows)
     return cluster_records(
         records,
         min_cluster_size=min_cluster_size,
@@ -227,8 +272,11 @@ def analyze_topics(collection, chat_id: str | None = None,
                    min_cluster_size: int = 5, top_terms: int = 8,
                    top_examples: int = 3, reduce_dim: int = 48,
                    evolution_bucket: str | None = None,
-                   evolution_top: int = 5) -> tuple[ClusteringResult, list[dict]]:
-    records = fetch_window_records(collection, chat_id, date_from, date_to)
+                   evolution_top: int = 5,
+                   max_windows: int | None = DEFAULT_MAX_WINDOWS) -> tuple[ClusteringResult, list[dict]]:
+    records, available = _subsample(
+        fetch_window_records(collection, chat_id, date_from, date_to), max_windows
+    )
     result = cluster_records(
         records,
         min_cluster_size=min_cluster_size,
@@ -236,6 +284,7 @@ def analyze_topics(collection, chat_id: str | None = None,
         top_terms=top_terms,
         top_examples=top_examples,
     )
+    result.available = available
     evolution: list[dict] = []
     if evolution_bucket and result.labels:
         evolution = topic_evolution(

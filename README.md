@@ -81,7 +81,10 @@ uv run chat-rag timeline "la papera" --bucket month     # how a phrase evolved
 
 `topics` normalises window embeddings, reduces them with PCA and clusters with
 HDBSCAN, labelling each cluster with its most distinctive terms (c-TF-IDF) and
-central messages (usable as citations). `jokes` counts repeated 2–4 word
+central messages (usable as citations). Clustering is capped at
+`--max-windows` (default 20000); larger collections are randomly sampled and the
+command reports how many windows were used (`--max-windows 0` disables the cap).
+`jokes` counts repeated 2–4 word
 n-grams, suppresses fragments subsumed by longer phrases, and reports frequency,
 date span and main users. All three are also exposed to the agent as
 `topic_clusters`, `inside_joke_candidates` and `phrase_timeline`.

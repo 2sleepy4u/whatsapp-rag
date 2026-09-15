@@ -251,6 +251,8 @@ def topic_clusters(
     )
     return {
         "total_windows": result.total,
+        "available_windows": result.available or result.total,
+        "sampled": result.available > result.total,
         "noise": result.noise,
         "noise_ratio": round(result.noise_ratio, 3),
         "clusters": [
