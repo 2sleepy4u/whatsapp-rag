@@ -4,11 +4,20 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from .config import load_settings
 from .db import stats as stats_mod
 from .db.db import open_db
+from .embed.index import (
+    chroma_client,
+    ensure_collection,
+    index_messages,
+    index_windows,
+    reset_index,
+)
+from .embed.ollama_embed import OllamaEmbedder
 from .ingest.loader import ingest_file
 from .ingest.parser_android import ParseStats, parse_file
 
@@ -361,6 +370,148 @@ def stats_time_of_day(
         wtable.add_row(_WEEKDAYS[d] if 0 <= d < 7 else str(d), f"{n:,}", _bar(n, wmax))
     console.print(wtable)
     conn.close()
+
+
+@app.command()
+def index(
+    chat: str | None = typer.Option(None, "--chat", help="Only index this chat_id"),
+    model: str | None = typer.Option(None, "--model", help="Embedding model (default from settings)"),
+    collection: str = typer.Option("messages", "--collection"),
+    batch: int = typer.Option(64, "--batch"),
+    window_size: int = typer.Option(6, "--window-size"),
+    window_stride: int = typer.Option(3, "--window-stride"),
+    no_windows: bool = typer.Option(False, "--no-windows", help="Skip conversation-window vectors"),
+    limit: int | None = typer.Option(None, "--limit", help="Cap items (for testing)"),
+    recreate: bool = typer.Option(False, "--recreate", help="Drop and rebuild the collection"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be embedded"),
+) -> None:
+    """Embed messages (and conversation windows) into the Chroma vector store."""
+    settings = load_settings()
+    settings.ensure_dirs()
+    model = model or settings.embed_model
+    conn = open_db(settings.db_path)
+    client = chroma_client(settings.chroma_dir)
+
+    if recreate:
+        reset_index(conn, client, collection, model)
+        console.print(f"[yellow]Recreated collection[/] {collection}")
+
+    col = ensure_collection(client, collection)
+    embedder = OllamaEmbedder(model, settings.ollama_host)
+
+    progress, make_cb = _reporter(console)
+    try:
+        msg_stats = index_messages(
+            conn, col, embedder, chat_id=chat, batch_size=batch, recreate=recreate,
+            limit=limit, progress=make_cb("Embedding messages"), dry_run=dry_run,
+        )
+        _print_index_stats(msg_stats, console)
+        if not no_windows:
+            win_stats = index_windows(
+                conn, col, embedder, chat_id=chat, size=window_size, stride=window_stride,
+                batch_size=max(1, batch // 2), recreate=recreate, limit=limit,
+                progress=make_cb("Embedding windows"), dry_run=dry_run,
+            )
+            _print_index_stats(win_stats, console)
+    except ConnectionError:
+        console.print(_ollama_hint(settings.ollama_host))
+        raise typer.Exit(code=1)
+    finally:
+        progress.stop()
+
+    console.print(f"[bold]Collection[/] {collection}: {col.count():,} vectors (model={model})")
+    conn.close()
+
+
+def _ollama_hint(host: str) -> str:
+    return (
+        f"[red]Cannot reach Ollama at {host}.[/]\n"
+        "Start it (on the desktop: `ollama serve`) and pull the models:\n"
+        "  ollama pull bge-m3\n"
+        "  ollama pull qwen2.5:7b"
+    )
+
+
+def _reporter(console: Console):
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+    )
+    state: dict = {}
+
+    def make_cb(label: str):
+        def cb(done: int, total: int) -> None:
+            task = state.get(label)
+            if task is None:
+                task = progress.add_task(label, total=total)
+                state[label] = task
+                progress.start()
+            progress.update(task, completed=done)
+
+        return cb
+
+    return progress, make_cb
+
+
+def _print_index_stats(stats, console: Console) -> None:
+    verb = "to embed" if stats.dry_run else "embedded"
+    console.print(
+        f"  [bold]{stats.kind}[/]: total={stats.total:,} {verb}={stats.pending if stats.dry_run else stats.embedded:,} "
+        f"skipped={stats.skipped:,} dim={stats.dim} batches={stats.batches} "
+        f"in {stats.elapsed:.1f}s"
+    )
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Natural-language query"),
+    chat: str | None = typer.Option(None, "--chat"),
+    top: int = typer.Option(10, "--top"),
+    kind: str = typer.Option("message", "--kind", help="message|window"),
+    model: str | None = typer.Option(None, "--model"),
+    collection: str = typer.Option("messages", "--collection"),
+) -> None:
+    """Semantic search over the vector store (sanity check for the index)."""
+    settings = load_settings()
+    model = model or settings.embed_model
+    client = chroma_client(settings.chroma_dir)
+    col = ensure_collection(client, collection)
+    embedder = OllamaEmbedder(model, settings.ollama_host)
+
+    where: dict | None = None
+    clauses = [{"kind": kind}]
+    if chat:
+        clauses.append({"chat_id": chat})
+    where = clauses[0] if len(clauses) == 1 else {"$and": clauses}
+
+    with console.status("Embedding query..."):
+        try:
+            qvec = embedder.embed([query])[0]
+        except ConnectionError:
+            console.print(_ollama_hint(settings.ollama_host))
+            raise typer.Exit(code=1)
+    result = col.query(query_embeddings=[qvec], n_results=top, where=where)
+
+    ids = result.get("ids", [[]])[0]
+    docs = result.get("documents", [[]])[0]
+    metas = result.get("metadatas", [[]])[0]
+    dists = result.get("distances", [[]])[0]
+
+    table = Table(title=f"Semantic search: {query!r}")
+    table.add_column("#", justify="right")
+    table.add_column("score", justify="right")
+    table.add_column("date")
+    table.add_column("who")
+    table.add_column("text", overflow="fold")
+    for i, (mid, doc, meta, dist) in enumerate(zip(ids, docs, metas, dists), start=1):
+        score = 1 - dist if dist is not None else 0.0
+        table.add_row(str(i), f"{score:.3f}", str(meta.get("local_date", meta.get("start_date", ""))),
+                      meta.get("sender_name", ""), doc)
+        _ = mid
+    console.print(table)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ dependencies = [
     "rich>=13.7",
     "emoji>=2.10",
     "pydantic>=2.7",
+    "chromadb>=1.5.9",
+    "ollama>=0.6.2",
 ]
 
 [project.scripts]

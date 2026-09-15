@@ -80,3 +80,16 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_file ON ingestion_runs(source_file, file_hash);
+
+CREATE TABLE IF NOT EXISTS embedding_index (
+    id         TEXT PRIMARY KEY,
+    collection TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    text_hash  TEXT NOT NULL,
+    ts         INTEGER,
+    indexed_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_embed_kind ON embedding_index(collection, kind);
+
