@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Nix / direnv
+.direnv/
+
+# Project data (private chats, derived indexes)
+/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Env
+.env
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
