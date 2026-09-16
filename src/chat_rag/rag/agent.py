@@ -134,12 +134,15 @@ EventFn = Callable[[str, dict], None]
 TokenFn = Callable[[str], None]
 
 
-def system_prompt(ctx: ToolContext, extra: str | None = None) -> str:
-    try:
-        chats = _list_chats_for_prompt(ctx)
-    except Exception:  # noqa: BLE001
-        chats = ""
-    prompt = f"""You are a private, offline analyst for exported WhatsApp conversations.
+def system_prompt(ctx: ToolContext, extra: str | None = None, base: str | None = None) -> str:
+    if base is not None:
+        prompt = base
+    else:
+        try:
+            chats = _list_chats_for_prompt(ctx)
+        except Exception:  # noqa: BLE001
+            chats = ""
+        prompt = f"""You are a private, offline analyst for exported WhatsApp conversations.
 Today's date: {date.today().isoformat()}.
 Available chats:
 {chats or '- (none indexed)'}
@@ -173,11 +176,12 @@ def run_agent(
     llm: LLM,
     max_steps: int = 6,
     system_extra: str | None = None,
+    system_override: str | None = None,
     on_event: EventFn | None = None,
     on_token: TokenFn | None = None,
 ) -> AgentResult:
     messages: list[dict] = [
-        {"role": "system", "content": system_prompt(ctx, system_extra)},
+        {"role": "system", "content": system_prompt(ctx, system_extra, system_override)},
         {"role": "user", "content": question},
     ]
     sources: dict[str, dict] = {}

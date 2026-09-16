@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..config import Settings
 from ..db.db import open_db
@@ -39,6 +40,7 @@ def answer_question(
     ctx: ToolContext | None = None,
     max_steps: int = 6,
     system_extra: str | None = None,
+    system_override: str | None = None,
     collection_name: str = "messages",
     on_event: EventFn | None = None,
     on_token: TokenFn | None = None,
@@ -54,6 +56,11 @@ def answer_question(
             num_predict=settings.llm_num_predict,
             think=settings.llm_think,
         )
+    if system_override is None and settings.system_prompt_file:
+        try:
+            system_override = Path(settings.system_prompt_file).read_text(encoding="utf-8")
+        except OSError:
+            system_override = None
 
     result: AgentResult = run_agent(
         question,
@@ -61,6 +68,7 @@ def answer_question(
         llm,
         max_steps=max_steps,
         system_extra=system_extra,
+        system_override=system_override,
         on_event=on_event,
         on_token=on_token,
     )
