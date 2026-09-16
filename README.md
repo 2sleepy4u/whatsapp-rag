@@ -52,6 +52,12 @@ quality); `--window-mode mean` averages the member message vectors instead,
 which is roughly two orders of magnitude faster and is plenty for clustering.
 The progress bar shows items/s, embedding throughput and an ETA.
 
+Set `CHAT_RAG_EMBED_CONTEXT=prevnext` to embed each message together with its
+previous/next message (short chat messages gain conversational context without
+extra model calls); the stored text stays the clean, quotable message.
+Switching context mode changes the per-message hash, so a re-run re-embeds
+automatically; use `--recreate` when you also want to refresh window vectors.
+
 ### Ask (v1)
 
 ```bash
@@ -63,13 +69,25 @@ uv run chat-rag ask "..." --show-steps   # show which tools the model called
 uv run chat-rag expand <id> --context 3  # full quote with surrounding messages
 ```
 
-The model decides dynamically which tools to use (semantic search, keyword/FTS,
-statistics, surrounding context) and every answer cites real message ids as
-`[id]`; the CLI resolves them to snippets and lets you expand the full quote.
+The model decides dynamically which tools to use and every answer cites real
+message ids as `[id]`; the CLI resolves them to snippets and lets you expand the
+full quote. Retrieval tools, in order of quality:
+
+- `smart_search` — expands the question into paraphrases (and optionally a
+  hypothetical answer) and fuses semantic + keyword results (best recall);
+- `hybrid_search` — semantic + exact keyword, fused with RRF;
+- `window_search` — searches whole conversation windows and returns the real
+  messages inside each hit (good for "how did this discussion develop");
+- `semantic_search` / `keyword_search` — single-channel lookups;
+- searches accept `context=N` to also return the N real messages before/after
+  each hit, so the model sees the surrounding exchange without extra calls.
+
 Answers stream token-by-token and tool calls are printed as they run, so you
 see progress instead of a silent spinner. `Ollama` generation is capped with
-`CHAT_RAG_LLM_NUM_PREDICT` and thinking models (qwen3) can be quieted with
-`CHAT_RAG_LLM_THINK=0`.
+`CHAT_RAG_LLM_NUM_PREDICT`. `CHAT_RAG_LLM_THINK` is tri-state for thinking
+models (qwen3): empty leaves the model default, `1` enables reasoning, `0`
+disables it. Set `CHAT_RAG_SYSTEM_PROMPT_FILE` to swap in your own system prompt
+(`{today}` and `{chats}` are interpolated; see `prompts/analyst.txt`).
 
 ### Topics & inside jokes
 
@@ -137,4 +155,17 @@ uv run python scripts/bench_transcribe.py --dir data/exports --limit 5 \
 uv run pytest
 uv run python scripts/gen_mock_export.py --messages 178000   # synthetic export -> data/exports/
 uv run python scripts/bench_embed.py --model bge-m3          # embedding throughput benchmark
+```
+
+### Evaluating the agent
+
+Compare models, prompts and thinking modes on a fixed question set (needs a
+running Ollama). The report shows tool usage, how many citations resolved
+against the DB, latency and answer length:
+
+```bash
+uv run python scripts/eval_rag.py \
+  --questions scripts/eval_questions.example.json \
+  --prompt prompts/analyst.txt --think auto,on --model qwen3:8b \
+  --out report.json
 ```

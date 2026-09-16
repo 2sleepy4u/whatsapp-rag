@@ -136,7 +136,15 @@ TokenFn = Callable[[str], None]
 
 def system_prompt(ctx: ToolContext, extra: str | None = None, base: str | None = None) -> str:
     if base is not None:
-        prompt = base
+        # A custom prompt can still interpolate the dynamic bits.
+        try:
+            chats = _list_chats_for_prompt(ctx)
+        except Exception:  # noqa: BLE001
+            chats = ""
+        prompt = (
+            base.replace("{today}", date.today().isoformat())
+            .replace("{chats}", chats or "- (none indexed)")
+        )
     else:
         try:
             chats = _list_chats_for_prompt(ctx)

@@ -11,8 +11,11 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(ENV_PREFIX + name, default)
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    return _env(name, "1" if default else "0").strip().lower() in {"1", "true", "yes", "on"}
+def _env_opt_bool(name: str) -> bool | None:
+    raw = os.environ.get(ENV_PREFIX + name)
+    if raw is None or not raw.strip():
+        return None
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -23,7 +26,7 @@ class Settings:
     llm_model: str
     embed_model: str
     llm_num_predict: int
-    llm_think: bool
+    llm_think: bool | None = None
     system_prompt_file: str | None = None
     embed_context: str = "none"
     transcribe_engine: str = "auto"
@@ -59,7 +62,7 @@ def load_settings() -> Settings:
         llm_model=_env("LLM_MODEL", "qwen2.5:7b"),
         embed_model=_env("EMBED_MODEL", "bge-m3"),
         llm_num_predict=int(_env("LLM_NUM_PREDICT", "1024")),
-        llm_think=_env_bool("LLM_THINK", False),
+        llm_think=_env_opt_bool("LLM_THINK"),
         system_prompt_file=_env("SYSTEM_PROMPT_FILE", "") or None,
         embed_context=_env("EMBED_CONTEXT", "none"),
         transcribe_engine=_env("TRANSCRIBE_ENGINE", "auto"),

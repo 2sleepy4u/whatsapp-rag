@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chat_rag.rag.agent import AssistantTurn, ToolCall, run_agent
+from chat_rag.rag.agent import AssistantTurn, ToolCall, run_agent, system_prompt
 from chat_rag.rag.citations import extract_ids, get_message, resolve_answer
 
 
@@ -100,3 +100,9 @@ def test_get_message(raw_conn):
     assert cit is not None
     assert cit.sender == "Alice"
     assert "mare" in cit.text
+
+
+def test_custom_system_prompt_interpolates(ctx):
+    prompt = system_prompt(ctx, base="Oggi {today}. Chat:\n{chats}")
+    assert "{today}" not in prompt and "{chats}" not in prompt
+    assert "- c (1:1" in prompt
