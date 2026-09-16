@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from chat_rag.analytics.clustering import ClusterExample
 from chat_rag.rag import tools
 
 
@@ -115,4 +116,30 @@ def test_dispatch_topic_clusters(ctx):
     data = tools.dispatch(ctx, "topic_clusters", {})
     assert "clusters" in data
     assert data["total_windows"] >= 0
+
+
+def test_window_search_returns_real_messages(ctx):
+    rows = tools.window_search(ctx, "mare", top=3)
+    assert rows
+    first = rows[0]
+    assert first["window_id"]
+    assert first["messages"]
+    valid = {f"{i:016x}" for i in range(1, 6)}
+    assert all(m["id"] in valid for m in first["messages"])
+
+
+def test_dispatch_window_search(ctx):
+    rows = tools.dispatch(ctx, "window_search", {"query": "mare", "top": 2})
+    assert isinstance(rows, list) and rows
+
+
+def test_cluster_examples_resolve_real_messages(ctx):
+    example = ClusterExample(
+        id="w1", date="2024-03-01", sender="", text="window text",
+        window_id="w1", message_ids=[f"{1:016x}", f"{2:016x}"],
+    )
+    out = tools._cluster_examples(ctx, [example])
+    assert out[0]["id"] == f"{1:016x}"
+    assert out[0]["window_id"] == "w1"
+    assert len(out[0]["messages"]) == 2
 

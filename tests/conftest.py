@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from chat_rag.db.db import open_db
-from chat_rag.embed.index import chroma_client, ensure_collection, index_messages
+from chat_rag.embed.index import chroma_client, ensure_collection, index_messages, index_windows
 from chat_rag.rag.tools import ToolContext
 
 CHAT = "c"
@@ -63,6 +63,7 @@ def ctx(tmp_path):
     col = ensure_collection(client, "messages")
     embedder = FakeEmbedder()
     index_messages(conn, col, embedder)
+    index_windows(conn, col, embedder, size=2, stride=1)
     return ToolContext(conn=conn, collection=col, embedder=embedder)
 
 

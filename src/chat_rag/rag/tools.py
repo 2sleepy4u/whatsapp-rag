@@ -64,6 +64,20 @@ def _records_to_dump(obj: Any) -> Any:
     return obj
 
 
+def _messages_by_ids(conn, ids: list[str]) -> list[dict]:
+    """Fetch real messages by id, preserving the order of ``ids``."""
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT id, local_date, local_time, sender_id, text, msg_type "
+        f"FROM messages WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    by_id = {r["id"]: _message_dict(r) for r in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
 def _build_where(kind: str | None, chat_id: str | None, sender: str | None,
                  date_from: str | None, date_to: str | None) -> dict | None:
     clauses: list[dict] = []
@@ -79,6 +93,17 @@ def _build_where(kind: str | None, chat_id: str | None, sender: str | None,
         clauses.append({"local_date": {"$lte": date_to}})
     if not clauses:
         return None
+    return clauses[0] if len(clauses) == 1 else {"$and": clauses}
+
+
+def _window_where(chat_id: str | None, date_from: str | None, date_to: str | None) -> dict:
+    clauses: list[dict] = [{"kind": "window"}]
+    if chat_id:
+        clauses.append({"chat_id": chat_id})
+    if date_from:
+        clauses.append({"start_date": {"$gte": date_from}})
+    if date_to:
+        clauses.append({"end_date": {"$lte": date_to}})
     return clauses[0] if len(clauses) == 1 else {"$and": clauses}
 
 
@@ -184,6 +209,47 @@ def hybrid_search(
         rec["keyword_rank"] = kw_rank.get(mid)
         out.append(rec)
     return _attach_context(ctx, out, context)
+
+
+def window_search(
+    ctx: ToolContext,
+    query: str,
+    top: int = 5,
+    chat_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    max_messages: int = 20,
+) -> list[dict]:
+    """Search conversation windows, returning the real messages inside each hit."""
+    qvec = ctx.embedder.embed([query])[0]
+    res = ctx.collection.query(
+        query_embeddings=[qvec],
+        n_results=max(1, min(top, 25)),
+        where=_window_where(chat_id, date_from, date_to),
+    )
+    ids = res.get("ids", [[]])[0]
+    docs = res.get("documents", [[]])[0]
+    metas = res.get("metadatas", [[]])[0]
+    dists = res.get("distances", [[]])[0]
+    out: list[dict] = []
+    for wid, doc, meta, dist in zip(ids, docs, metas, dists):
+        raw = str(meta.get("message_ids") or "")
+        member_ids = [x for x in raw.split(",") if x]
+        if not member_ids and meta.get("start_id"):
+            member_ids = [meta["start_id"]]
+        messages = _messages_by_ids(ctx.conn, member_ids)[: max(1, min(max_messages, 50))]
+        out.append(
+            {
+                "window_id": wid,
+                "chat_id": meta.get("chat_id", ""),
+                "start_date": meta.get("start_date", ""),
+                "end_date": meta.get("end_date", ""),
+                "score": round(1 - dist, 4) if dist is not None else None,
+                "text": _clip(doc, 1200),
+                "messages": messages,
+            }
+        )
+    return out
 
 
 def _fts_query(query: str) -> str:
@@ -328,15 +394,43 @@ def topic_clusters(
                 "terms": c.terms,
                 "start_date": c.start_date,
                 "end_date": c.end_date,
-                "examples": [
-                    {"id": e.id, "date": e.date, "sender": e.sender, "text": e.text}
-                    for e in c.examples
-                ],
+                "examples": _cluster_examples(ctx, c.examples),
             }
             for c in result.clusters
         ],
         "evolution": evolution,
     }
+
+
+def _cluster_examples(ctx: ToolContext, examples, limit: int = 10) -> list[dict]:
+    """Turn window-level examples into real, citable messages."""
+    out: list[dict] = []
+    for e in examples:
+        messages = _messages_by_ids(ctx.conn, e.message_ids)[:limit]
+        if messages:
+            first = messages[0]
+            out.append(
+                {
+                    "id": first["id"],
+                    "window_id": e.window_id or e.id,
+                    "date": first["date"],
+                    "sender": first["sender"],
+                    "text": first["text"],
+                    "messages": messages,
+                }
+            )
+        else:
+            out.append(
+                {
+                    "id": e.id,
+                    "window_id": e.window_id or e.id,
+                    "date": e.date,
+                    "sender": e.sender,
+                    "text": _clip(e.text, 300),
+                    "messages": [],
+                }
+            )
+    return out
 
 
 def inside_joke_candidates(
@@ -468,6 +562,22 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "window_search",
+            "description": "Search whole conversation windows (blocks of consecutive messages) and get the real messages inside each hit. Best for richer context, how a discussion developed, or vague topic queries.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "top": {"type": "integer", "description": "How many windows (default 5)"},
+                    **_FILTERS,
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "keyword_search",
             "description": "Exact word/phrase search (FTS). Best for specific names, nicknames or phrases the model knows literally.",
             "parameters": {
@@ -579,6 +689,11 @@ def _call_hybrid(ctx: ToolContext, args: dict) -> Any:
     return hybrid_search(ctx, **args)
 
 
+def _call_window(ctx: ToolContext, args: dict) -> Any:
+    args = {k: v for k, v in args.items() if v is not None}
+    return window_search(ctx, **args)
+
+
 def _call_keyword(ctx: ToolContext, args: dict) -> Any:
     args = {k: v for k, v in args.items() if v is not None}
     return keyword_search(ctx, **args)
@@ -617,6 +732,7 @@ _DISPATCH: dict[str, Dispatch] = {
     "list_chats": _call_list,
     "semantic_search": _call_semantic,
     "hybrid_search": _call_hybrid,
+    "window_search": _call_window,
     "keyword_search": _call_keyword,
     "get_stats": _call_stats,
     "get_context": _call_context,

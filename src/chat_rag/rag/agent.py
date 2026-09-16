@@ -149,7 +149,7 @@ Available chats:
 
 Rules:
 - Always call a tool before answering factual questions. Never invent messages, dates, senders or numbers.
-- Prefer hybrid_search (semantic + exact) for factual lookups; semantic_search = meaning/topics; keyword_search = exact words or nicknames; get_stats = counts/averages/trends; get_context = messages around one id.
+- Prefer hybrid_search (semantic + exact) for factual lookups; window_search for richer context around a discussion; semantic_search = meaning/topics; keyword_search = exact words or nicknames; get_stats = counts/averages/trends; get_context = messages around one id.
 - Pass context=2 on searches when the surrounding exchange matters; then call get_context only for deeper digging.
 - When you mention or rely on a message, cite its exact id in square brackets, e.g. [3f9a1c2b4d5e6f70].
 - Use only ids returned by tools. Do not fabricate ids.

@@ -104,6 +104,10 @@ def test_index_windows(tmp_path):
     assert stats.embedded == 4
     assert stats.kind == "window"
 
+    got = col.get(where={"kind": "window"}, include=["metadatas"])
+    assert got["metadatas"]
+    assert all(m.get("message_ids") for m in got["metadatas"])
+
 
 def test_index_messages_dedups_identical_texts(tmp_path):
     conn = open_db(tmp_path / "chat.db")

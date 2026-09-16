@@ -330,6 +330,9 @@ def build_windows(rows: Iterable, size: int, stride: int) -> list[_Window]:
                         "start_date": first["local_date"],
                         "end_date": last["local_date"],
                         "messages": len(chunk),
+                        # Delimited (not a list: Chroma metadata values are scalar).
+                        # Lets retrieval/clustering map a window back to real messages.
+                        "message_ids": ",".join(m["id"] for m in chunk),
                     },
                     message_ids=[m["id"] for m in chunk],
                 )

@@ -29,6 +29,8 @@ class ClusterExample:
     date: str
     sender: str
     text: str
+    window_id: str = ""
+    message_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -147,12 +149,16 @@ def cluster_records(
             meta = rec["meta"]
             date = meta.get("start_date") or meta.get("local_date", "")
             dates.append(date)
+            raw_ids = meta.get("message_ids") or ""
+            member_ids = [x for x in str(raw_ids).split(",") if x]
             examples.append(
                 ClusterExample(
-                    id=rec["id"],
+                    id=member_ids[0] if member_ids else rec["id"],
                     date=date,
                     sender=meta.get("sender_name", ""),
                     text=rec["text"][:300],
+                    window_id=rec["id"],
+                    message_ids=member_ids,
                 )
             )
         all_dates = [records[i]["meta"].get("start_date", "") for i in idxs if records[i]["meta"].get("start_date")]
