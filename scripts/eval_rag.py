@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """A/B evaluation for the RAG agent on a set of questions.
 
-Runs every question under one or more variants (prompt file and/or thinking mode)
-and prints an aggregate table plus per-question results. Requires a running
-Ollama with the configured LLM/embedding models; use the hermetic pytest suite
-for logic-only checks.
+Runs every question under one or more variants (prompt file, thinking mode and
+sampling temperature) and prints an aggregate table plus per-question results.
+Requires a running Ollama with the configured LLM/embedding models; use the
+hermetic pytest suite for logic-only checks.
 
 Usage::
 
     uv run python scripts/eval_rag.py --questions questions.json \
-        --prompt prompts/strict.txt --think auto,on --out report.json
+        --prompt prompts/strict.txt --think auto,on --temperature 0,0.7 --out report.json
 
 Questions file format: a JSON list of strings, or of ``{"question": "..."}``.
 """
@@ -23,33 +23,17 @@ from pathlib import Path
 
 from chat_rag.config import load_settings
 from chat_rag.rag.agent import OllamaLLM
-from chat_rag.rag.eval import Variant, load_questions, run_eval, summarize
+from chat_rag.rag.eval import Variant, build_variants, load_questions, run_eval, summarize
 from chat_rag.rag.service import answer_question, build_context
 
 _THINK = {"auto": None, "off": False, "on": True}
 
 
-def _suffix(think: bool | None) -> str:
-    return {None: "-auto", False: "-think-off", True: "-think-on"}[think]
-
-
-def build_variants(prompt_path: str | None, thinks: list[bool | None]) -> list[Variant]:
-    base_prompt = Path(prompt_path).read_text(encoding="utf-8") if prompt_path else None
-    variants: list[Variant] = []
-    for think in thinks:
-        variants.append(Variant(name=f"base{_suffix(think)}", system_override=None, think=think))
-        if base_prompt is not None:
-            variants.append(
-                Variant(name=f"prompt{_suffix(think)}", system_override=base_prompt, think=think)
-            )
-    return variants
-
-
 def make_ask(settings, ctx, max_steps: int):
-    cache: dict[tuple[str, bool | None], OllamaLLM] = {}
+    cache: dict[tuple[str, bool | None, float], OllamaLLM] = {}
 
     def ask(question: str, variant: Variant):
-        key = (settings.llm_model, variant.think)
+        key = (settings.llm_model, variant.think, variant.temperature)
         llm = cache.get(key)
         if llm is None:
             llm = OllamaLLM(
@@ -57,6 +41,7 @@ def make_ask(settings, ctx, max_steps: int):
                 settings.ollama_host,
                 num_predict=settings.llm_num_predict,
                 think=variant.think,
+                temperature=variant.temperature,
             )
             cache[key] = llm
         return answer_question(
@@ -76,6 +61,7 @@ def main() -> None:
     ap.add_argument("--questions", required=True, help="JSON file with the questions")
     ap.add_argument("--prompt", help="Alternative system prompt file to A/B")
     ap.add_argument("--think", default="auto,on", help="Comma list of auto|off|on")
+    ap.add_argument("--temperature", default="0.0", help="Comma list of temperatures, e.g. 0,0.3,0.7")
     ap.add_argument("--model", help="Override CHAT_RAG_LLM_MODEL for this run")
     ap.add_argument("--max-steps", type=int, default=6)
     ap.add_argument("--out", help="Write raw per-question results as JSON")
@@ -87,7 +73,9 @@ def main() -> None:
 
     questions = load_questions(args.questions)
     thinks = [_THINK[t.strip()] for t in args.think.split(",") if t.strip()]
-    variants = build_variants(args.prompt, thinks)
+    temperatures = [float(t) for t in args.temperature.split(",") if t.strip()]
+    prompt_text = Path(args.prompt).read_text(encoding="utf-8") if args.prompt else None
+    variants = build_variants(prompt_text, thinks, temperatures)
 
     settings.ensure_dirs()
     ctx = build_context(settings)

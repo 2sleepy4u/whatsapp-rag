@@ -84,10 +84,12 @@ full quote. Retrieval tools, in order of quality:
 
 Answers stream token-by-token and tool calls are printed as they run, so you
 see progress instead of a silent spinner. `Ollama` generation is capped with
-`CHAT_RAG_LLM_NUM_PREDICT`. `CHAT_RAG_LLM_THINK` is tri-state for thinking
-models (qwen3): empty leaves the model default, `1` enables reasoning, `0`
-disables it. Set `CHAT_RAG_SYSTEM_PROMPT_FILE` to swap in your own system prompt
-(`{today}` and `{chats}` are interpolated; see `prompts/analyst.txt`).
+`CHAT_RAG_LLM_NUM_PREDICT` and sampled with `CHAT_RAG_LLM_TEMPERATURE` (0 =
+deterministic/factual; 0.3-0.7 for more variety). `CHAT_RAG_LLM_THINK` is
+tri-state for thinking models (qwen3): empty leaves the model default, `1`
+enables reasoning, `0` disables it. Set `CHAT_RAG_SYSTEM_PROMPT_FILE` to swap in
+your own system prompt (`{today}` and `{chats}` are interpolated; see
+`prompts/analyst.txt`).
 
 ### Topics & inside jokes
 
@@ -159,13 +161,13 @@ uv run python scripts/bench_embed.py --model bge-m3          # embedding through
 
 ### Evaluating the agent
 
-Compare models, prompts and thinking modes on a fixed question set (needs a
-running Ollama). The report shows tool usage, how many citations resolved
-against the DB, latency and answer length:
+Compare models, prompts, thinking modes and temperatures on a fixed question
+set (needs a running Ollama). The report shows tool usage, how many citations
+resolved against the DB, latency and answer length:
 
 ```bash
 uv run python scripts/eval_rag.py \
   --questions scripts/eval_questions.example.json \
-  --prompt prompts/analyst.txt --think auto,on --model qwen3:8b \
-  --out report.json
+  --prompt prompts/analyst.txt --think auto,on --temperature 0,0.3,0.7 \
+  --model qwen3:8b --out report.json
 ```

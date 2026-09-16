@@ -19,6 +19,13 @@ def test_embed_context_default(monkeypatch):
     assert load_settings().embed_context == "none"
 
 
+def test_llm_temperature_env(monkeypatch):
+    monkeypatch.delenv("CHAT_RAG_LLM_TEMPERATURE", raising=False)
+    assert load_settings().llm_temperature == 0.0
+    monkeypatch.setenv("CHAT_RAG_LLM_TEMPERATURE", "0.7")
+    assert load_settings().llm_temperature == 0.7
+
+
 def test_system_prompt_file_env(monkeypatch):
     monkeypatch.setenv("CHAT_RAG_SYSTEM_PROMPT_FILE", "/tmp/p.txt")
     assert load_settings().system_prompt_file == "/tmp/p.txt"

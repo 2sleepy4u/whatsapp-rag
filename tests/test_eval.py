@@ -8,6 +8,7 @@ from chat_rag.rag.citations import Citation
 from chat_rag.rag.eval import (
     QuestionResult,
     Variant,
+    build_variants,
     load_questions,
     run_eval,
     summarize,
@@ -50,6 +51,30 @@ def test_load_questions_rejects_bad_entry(tmp_path):
         raise AssertionError("expected ValueError")
 
 
+def test_build_variants_cross_product():
+    variants = build_variants("PROMPT", [None, True], [0.0, 0.7])
+    names = [v.name for v in variants]
+    assert names == [
+        "base-auto-t0",
+        "prompt-auto-t0",
+        "base-auto-t0.7",
+        "prompt-auto-t0.7",
+        "base-think-on-t0",
+        "prompt-think-on-t0",
+        "base-think-on-t0.7",
+        "prompt-think-on-t0.7",
+    ]
+    assert all(v.temperature == 0.0 for v in variants if v.name.endswith("t0"))
+    assert all(v.system_override == "PROMPT" for v in variants if v.name.startswith("prompt"))
+
+
+def test_build_variants_without_prompt():
+    variants = build_variants(None, [False], [0.3])
+    assert [v.name for v in variants] == ["base-think-off-t0.3"]
+    assert variants[0].temperature == 0.3
+    assert variants[0].system_override is None
+
+
 def test_run_eval_and_summarize():
     variants = [Variant("base"), Variant("prompt")]
 
@@ -86,3 +111,20 @@ def test_answer_question_passes_system_override(ctx):
     ans = answer_question(settings, "domanda", llm=llm, ctx=ctx, system_override="PROMPT PERSONALIZZATO")
     assert ans.answer == "ciao"
     assert llm.calls[0]["messages"][0]["content"] == "PROMPT PERSONALIZZATO"
+
+
+def test_answer_question_builds_llm_with_temperature(ctx, monkeypatch):
+    settings = load_settings()
+    captured: dict = {}
+
+    class FakeOllama:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def chat(self, messages, tools):
+            return AssistantTurn(content="ok", tool_calls=[])
+
+    monkeypatch.setattr("chat_rag.rag.service.OllamaLLM", FakeOllama)
+    answer_question(settings, "q", ctx=ctx)
+    assert captured["temperature"] == settings.llm_temperature
+    assert captured["think"] == settings.llm_think

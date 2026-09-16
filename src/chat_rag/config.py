@@ -27,6 +27,7 @@ class Settings:
     embed_model: str
     llm_num_predict: int
     llm_think: bool | None = None
+    llm_temperature: float = 0.0
     system_prompt_file: str | None = None
     embed_context: str = "none"
     transcribe_engine: str = "auto"
@@ -63,6 +64,7 @@ def load_settings() -> Settings:
         embed_model=_env("EMBED_MODEL", "bge-m3"),
         llm_num_predict=int(_env("LLM_NUM_PREDICT", "1024")),
         llm_think=_env_opt_bool("LLM_THINK"),
+        llm_temperature=float(_env("LLM_TEMPERATURE", "0.0")),
         system_prompt_file=_env("SYSTEM_PROMPT_FILE", "") or None,
         embed_context=_env("EMBED_CONTEXT", "none"),
         transcribe_engine=_env("TRANSCRIBE_ENGINE", "auto"),

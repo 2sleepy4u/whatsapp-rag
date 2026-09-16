@@ -27,6 +27,7 @@ class Variant:
     name: str
     system_override: str | None = None
     think: bool | None = None
+    temperature: float = 0.0
 
 
 @dataclass
@@ -44,6 +45,32 @@ class QuestionResult:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def build_variants(
+    prompt_text: str | None,
+    thinks: list[bool | None],
+    temperatures: list[float],
+) -> list[Variant]:
+    """Cross-product of prompt/think/temperature into named variants."""
+    think_suffix = {None: "-auto", False: "-think-off", True: "-think-on"}
+    variants: list[Variant] = []
+    for think in thinks:
+        for temperature in temperatures:
+            suffix = f"{think_suffix[think]}-t{temperature:g}"
+            variants.append(
+                Variant(name=f"base{suffix}", think=think, temperature=temperature)
+            )
+            if prompt_text is not None:
+                variants.append(
+                    Variant(
+                        name=f"prompt{suffix}",
+                        system_override=prompt_text,
+                        think=think,
+                        temperature=temperature,
+                    )
+                )
+    return variants
 
 
 def load_questions(path: str | Path) -> list[str]:

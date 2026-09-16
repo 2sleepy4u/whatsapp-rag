@@ -54,6 +54,7 @@ def answer_question(
             settings.ollama_host,
             num_predict=settings.llm_num_predict,
             think=settings.llm_think,
+            temperature=settings.llm_temperature,
         )
     if ctx is None:
         settings.ensure_dirs()
