@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from chat_rag.analytics.clustering import ClusterExample
 from chat_rag.rag import tools
+from chat_rag.rag.agent import AssistantTurn
+
+
+class FakeLLM:
+    def __init__(self, content: str = "gita al mare\nmare al tramonto") -> None:
+        self.content = content
+
+    def chat(self, messages, tools):
+        return AssistantTurn(content=self.content, tool_calls=[])
 
 
 def test_list_chats(ctx):
@@ -59,6 +70,30 @@ def test_hybrid_search_context(ctx):
 def test_dispatch_hybrid(ctx):
     rows = tools.dispatch(ctx, "hybrid_search", {"query": "mare"})
     assert isinstance(rows, list) and rows
+
+
+def test_smart_search_falls_back_without_llm(ctx):
+    rows = tools.smart_search(ctx, "mare", top=3)
+    assert rows
+    assert all("channels" in r for r in rows)
+
+
+def test_smart_search_uses_llm_expansion(ctx):
+    ctx2 = replace(ctx, llm=FakeLLM())
+    rows = tools.smart_search(ctx2, "mare", top=5, context=1)
+    assert rows
+    assert all("context" in r for r in rows)
+
+
+def test_dispatch_smart(ctx):
+    assert tools.dispatch(ctx, "smart_search", {"query": "mare"})
+
+
+def test_tool_schemas_match_dispatch(ctx):
+    for schema in tools.TOOL_SCHEMAS:
+        name = schema["function"]["name"]
+        result = tools.dispatch(ctx, name, {})
+        assert not (isinstance(result, dict) and str(result.get("error", "")).startswith("unknown tool"))
 
 
 def test_get_stats_per_sender(ctx):

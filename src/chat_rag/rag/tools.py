@@ -30,6 +30,7 @@ class ToolContext:
     conn: Any
     collection: Any
     embedder: Any
+    llm: Any | None = None
 
 
 # --- helpers ---------------------------------------------------------------
@@ -207,6 +208,65 @@ def hybrid_search(
         rec["channels"] = channels
         rec["semantic_rank"] = sem_rank.get(mid)
         rec["keyword_rank"] = kw_rank.get(mid)
+        out.append(rec)
+    return _attach_context(ctx, out, context)
+
+
+def smart_search(
+    ctx: ToolContext,
+    query: str,
+    top: int = 10,
+    context: int = 2,
+    expand: int = 3,
+    use_hyde: bool = False,
+    chat_id: str | None = None,
+    sender: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[dict]:
+    """Best-recall search: LLM query expansion + HyDE, fused with RRF.
+
+    Falls back to ``hybrid_search`` when no LLM is available in the context.
+    """
+    filters = dict(
+        chat_id=chat_id, sender=sender, date_from=date_from, date_to=date_to
+    )
+    if ctx.llm is None:
+        return hybrid_search(ctx, query, top=top, context=context, **filters)
+
+    from .query import expand_queries, hyde_document
+
+    queries = [query] + expand_queries(ctx.llm, query, n=max(0, min(expand, 5)))
+    if use_hyde:
+        draft = hyde_document(ctx.llm, query)
+        if draft:
+            queries.append(draft)
+
+    top = max(1, min(top, 50))
+    pool = min(top * 2, 50)
+    by_id: dict[str, dict] = {}
+    sem_lists: list[list[str]] = []
+    kw_lists: list[list[str]] = []
+    for q in queries:
+        sem = semantic_search(ctx, q, top=pool, **filters)
+        sem_lists.append([r["id"] for r in sem])
+        for rec in sem:
+            by_id.setdefault(rec["id"], rec)
+    for q in queries:
+        kw = keyword_search(ctx, q, top=pool, chat_id=chat_id, date_from=date_from, date_to=date_to)
+        kw_lists.append([r["id"] for r in kw])
+        for rec in kw:
+            by_id.setdefault(rec["id"], rec)
+
+    scores = _rrf(sem_lists + kw_lists)
+    ranked = sorted(scores, key=lambda mid: scores[mid], reverse=True)[:top]
+    sem_ids = {mid for lst in sem_lists for mid in lst}
+    kw_ids = {mid for lst in kw_lists for mid in lst}
+    out: list[dict] = []
+    for mid in ranked:
+        rec = dict(by_id[mid])
+        rec["score"] = round(scores[mid], 6)
+        rec["channels"] = [c for c, ids in (("semantic", sem_ids), ("keyword", kw_ids)) if mid in ids]
         out.append(rec)
     return _attach_context(ctx, out, context)
 
@@ -562,6 +622,26 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "smart_search",
+            "description": "Highest-quality search: the model expands the query into paraphrases (and optionally drafts a likely answer) and fuses semantic + keyword results. Best for broad, vague or hard questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "top": {"type": "integer", "description": "How many results (default 10)"},
+                    "context": {"type": "integer", "description": "Real messages before/after each hit (default 2)"},
+                    "expand": {"type": "integer", "description": "How many paraphrases to generate (default 3)"},
+                    "use_hyde": {"type": "boolean", "description": "Also embed a hypothetical answer"},
+                    "sender": {"type": "string", "description": "Filter by sender name"},
+                    **_FILTERS,
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "window_search",
             "description": "Search whole conversation windows (blocks of consecutive messages) and get the real messages inside each hit. Best for richer context, how a discussion developed, or vague topic queries.",
             "parameters": {
@@ -689,6 +769,11 @@ def _call_hybrid(ctx: ToolContext, args: dict) -> Any:
     return hybrid_search(ctx, **args)
 
 
+def _call_smart(ctx: ToolContext, args: dict) -> Any:
+    args = {k: v for k, v in args.items() if v is not None}
+    return smart_search(ctx, **args)
+
+
 def _call_window(ctx: ToolContext, args: dict) -> Any:
     args = {k: v for k, v in args.items() if v is not None}
     return window_search(ctx, **args)
@@ -732,6 +817,7 @@ _DISPATCH: dict[str, Dispatch] = {
     "list_chats": _call_list,
     "semantic_search": _call_semantic,
     "hybrid_search": _call_hybrid,
+    "smart_search": _call_smart,
     "window_search": _call_window,
     "keyword_search": _call_keyword,
     "get_stats": _call_stats,

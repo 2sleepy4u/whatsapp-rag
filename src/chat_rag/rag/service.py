@@ -25,12 +25,14 @@ class Answer:
         return [s["tool"] for s in self.steps]
 
 
-def build_context(settings: Settings, collection_name: str = "messages") -> ToolContext:
+def build_context(
+    settings: Settings, collection_name: str = "messages", llm: LLM | None = None
+) -> ToolContext:
     conn = open_db(settings.db_path)
     client = chroma_client(settings.chroma_dir)
     collection = ensure_collection(client, collection_name)
     embedder = OllamaEmbedder(settings.embed_model, settings.ollama_host)
-    return ToolContext(conn=conn, collection=collection, embedder=embedder)
+    return ToolContext(conn=conn, collection=collection, embedder=embedder, llm=llm)
 
 
 def answer_question(
@@ -46,9 +48,6 @@ def answer_question(
     on_token: TokenFn | None = None,
 ) -> Answer:
     owns_ctx = ctx is None
-    if ctx is None:
-        settings.ensure_dirs()
-        ctx = build_context(settings, collection_name)
     if llm is None:
         llm = OllamaLLM(
             settings.llm_model,
@@ -56,6 +55,9 @@ def answer_question(
             num_predict=settings.llm_num_predict,
             think=settings.llm_think,
         )
+    if ctx is None:
+        settings.ensure_dirs()
+        ctx = build_context(settings, collection_name, llm=llm)
     if system_override is None and settings.system_prompt_file:
         try:
             system_override = Path(settings.system_prompt_file).read_text(encoding="utf-8")
