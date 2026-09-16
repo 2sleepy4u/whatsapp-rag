@@ -422,6 +422,7 @@ def index(
         msg_stats = index_messages(
             conn, col, embedder, chat_id=chat, batch_size=batch, recreate=recreate,
             limit=limit, progress=make_cb("Embedding messages"), dry_run=dry_run,
+            context_mode=settings.embed_context,
         )
         _print_index_stats(msg_stats, console)
         if not no_windows:

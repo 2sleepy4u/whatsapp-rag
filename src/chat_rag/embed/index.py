@@ -112,17 +112,19 @@ def _flush(
     embedder: EmbeddingClient,
     kind: str,
     ids: list[str],
-    texts: list[str],
+    documents: list[str],
     embeddings: list[list[float]],
     metadatas: list[dict],
     now: int,
+    hash_texts: list[str] | None = None,
 ) -> None:
+    hash_texts = hash_texts if hash_texts is not None else documents
     for start in range(0, len(ids), MAX_UPSERT):
         stop = start + MAX_UPSERT
         collection.upsert(
             ids=ids[start:stop],
             embeddings=embeddings[start:stop],
-            documents=texts[start:stop],
+            documents=documents[start:stop],
             metadatas=metadatas[start:stop],
         )
     conn.executemany(
@@ -130,7 +132,7 @@ def _flush(
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
             (i, collection.name, kind, embedder.model, _text_hash(t), md.get("ts"), now)
-            for i, t, md in zip(ids, texts, metadatas)
+            for i, t, md in zip(ids, hash_texts, metadatas)
         ],
     )
     conn.commit()
@@ -141,12 +143,15 @@ def _run_batches(
     collection,
     embedder: EmbeddingClient,
     kind: str,
-    items: list[tuple[str, str, dict]],
+    items: list[tuple[str, str, str, dict]],
     batch_size: int,
     stats: IndexStats,
     progress: ProgressFn | None,
 ) -> None:
-    """Embed ``items`` while embedding identical texts only once.
+    """Embed ``items`` (id, document, embed_text, meta) while embedding identical texts only once.
+
+    Only ``embed_text`` is sent to the model; ``document`` is what Chroma stores
+    and returns (so contextual embeddings keep clean, quotable message text).
 
     Ollama's embedding path costs roughly 20-25 ms *per input* regardless of
     text length (and independently of batching or concurrency), so the single
@@ -159,11 +164,11 @@ def _run_batches(
     batch_size = max(1, batch_size)
 
     by_text: dict[str, list[int]] = {}
-    for idx, (_mid, text, _meta) in enumerate(items):
+    for idx, (_mid, _doc, text, _meta) in enumerate(items):
         by_text.setdefault(text, []).append(idx)
     unique_texts = list(by_text.keys())
 
-    buffer: list[tuple[str, str, list[float], dict]] = []
+    buffer: list[tuple[str, str, list[float], dict, str]] = []
     flush_size = max(batch_size, 512)
     done = 0
 
@@ -195,6 +200,7 @@ def _run_batches(
                 [b[2] for b in part],
                 [b[3] for b in part],
                 now,
+                hash_texts=[b[4] for b in part],
             )
             stats.flush_seconds += time.time() - started
 
@@ -209,7 +215,8 @@ def _run_batches(
             stats.dim = len(embeddings[0])
         for text, vec in zip(chunk, embeddings):
             for idx in by_text[text]:
-                buffer.append((items[idx][0], text, vec, items[idx][2]))
+                item = items[idx]
+                buffer.append((item[0], item[1], vec, item[3], text))
                 done += 1
         if len(buffer) >= flush_size:
             flush_buffer()
@@ -226,17 +233,63 @@ def _prepare(
     collection,
     embedder: EmbeddingClient,
     kind: str,
-    candidates: list[tuple[str, str, dict]],
+    candidates: list[tuple[str, str, str, dict]],
     recreate: bool,
-) -> list[tuple[str, str, dict]]:
+) -> list[tuple[str, str, str, dict]]:
     existing = {} if recreate else _existing_hashes(conn, collection.name, embedder.model, kind)
-    pending: list[tuple[str, str, dict]] = []
-    for cid, text, meta in candidates:
+    pending: list[tuple[str, str, str, dict]] = []
+    for cid, doc, text, meta in candidates:
         prev = existing.get(cid)
         if prev is not None and prev == _text_hash(text):
             continue
-        pending.append((cid, text, meta))
+        pending.append((cid, doc, text, meta))
     return pending
+
+
+def _message_candidates(rows, context_mode: str = "none") -> list[tuple[str, str, str, dict]]:
+    """Build (id, document, embed_text, meta) for each message.
+
+    ``document`` is what Chroma stores/returns (``"Sender: text"``).
+    ``embed_text`` is what gets embedded: the document, or (``prevnext``) the
+    document together with its immediate neighbours so short messages carry
+    conversational context without extra model calls.
+    """
+    by_chat: dict[str, list] = {}
+    for row in rows:
+        by_chat.setdefault(row["chat_id"], []).append(row)
+
+    out: list[tuple[str, str, str, dict]] = []
+    for chat, msgs in by_chat.items():
+        docs = [_message_text(m) for m in msgs]
+        for i, row in enumerate(msgs):
+            document = docs[i]
+            if context_mode == "prevnext":
+                parts = []
+                if i > 0:
+                    parts.append(docs[i - 1])
+                parts.append(document)
+                if i + 1 < len(docs):
+                    parts.append(docs[i + 1])
+                embed_text = "\n".join(parts)
+            else:
+                embed_text = document
+            out.append(
+                (
+                    row["id"],
+                    document,
+                    embed_text,
+                    {
+                        "chat_id": row["chat_id"],
+                        "sender_id": row["sender_id"] or "",
+                        "sender_name": _sender_name(row),
+                        "ts": int(row["ts"]),
+                        "local_date": row["local_date"],
+                        "msg_type": row["msg_type"],
+                        "kind": "message",
+                    },
+                )
+            )
+    return out
 
 
 def index_messages(
@@ -250,27 +303,15 @@ def index_messages(
     limit: int | None = None,
     progress: ProgressFn | None = None,
     dry_run: bool = False,
+    context_mode: str = "none",
 ) -> IndexStats:
+    if context_mode not in {"none", "prevnext"}:
+        raise ValueError(f"context_mode must be 'none' or 'prevnext', got {context_mode!r}")
     stats = IndexStats(kind="message", model=embedder.model, dry_run=dry_run)
     started = time.time()
     rows = _fetch_messages(conn, chat_id, types)
     stats.total = len(rows)
-    candidates = [
-        (
-            row["id"],
-            _message_text(row),
-            {
-                "chat_id": row["chat_id"],
-                "sender_id": row["sender_id"] or "",
-                "sender_name": _sender_name(row),
-                "ts": int(row["ts"]),
-                "local_date": row["local_date"],
-                "msg_type": row["msg_type"],
-                "kind": "message",
-            },
-        )
-        for row in rows
-    ]
+    candidates = _message_candidates(rows, context_mode)
     if limit:
         candidates = candidates[:limit]
     pending = _prepare(conn, collection, embedder, "message", candidates, recreate)
@@ -354,7 +395,7 @@ def _mean_pool_windows(
     conn,
     collection,
     embedder: EmbeddingClient,
-    pending: list[tuple[str, str, dict]],
+    pending: list[tuple[str, str, str, dict]],
     windows_by_id: dict[str, _Window],
     stats: IndexStats,
     progress: ProgressFn | None,
@@ -368,7 +409,7 @@ def _mean_pool_windows(
     started = time.time()
     needed: list[str] = []
     seen: set[str] = set()
-    for wid, _text, _meta in pending:
+    for wid, _text, _embed, _meta in pending:
         for mid in windows_by_id[wid].message_ids:
             if mid not in seen:
                 seen.add(mid)
@@ -395,7 +436,7 @@ def _mean_pool_windows(
                 },
             )
 
-    for i, (wid, text, meta) in enumerate(pending, start=1):
+    for i, (wid, text, _embed, meta) in enumerate(pending, start=1):
         members = [vectors[mid] for mid in windows_by_id[wid].message_ids if mid in vectors]
         if not members:
             continue
@@ -443,7 +484,7 @@ def index_windows(
     rows = _fetch_messages(conn, chat_id, INDEXABLE_TYPES)
     windows = build_windows(rows, size, stride)
     stats.total = len(windows)
-    candidates = [(w.id, w.text, w.meta) for w in windows]
+    candidates = [(w.id, w.text, w.text, w.meta) for w in windows]
     if limit:
         candidates = candidates[:limit]
     pending = _prepare(conn, collection, embedder, "window", candidates, recreate)

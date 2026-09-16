@@ -22,10 +22,12 @@ class FakeEmbedder:
         self.dim = dim
         self.calls = 0
         self.texts_seen = 0
+        self.seen: list[str] = []
 
     def embed(self, texts):
         self.calls += 1
         self.texts_seen += len(texts)
+        self.seen.extend(texts)
         out = []
         for text in texts:
             vec = [0.0] * self.dim
@@ -197,3 +199,42 @@ def test_build_windows_tail_included():
     windows = build_windows(rows, size=2, stride=1)
     assert len(windows) == 4
     assert windows[-1].meta["end_id"] == "m4"
+
+
+def _fresh(tmp_path):
+    conn = open_db(tmp_path / "chat.db")
+    _seed(conn)
+    col = ensure_collection(chroma_client(tmp_path / "chroma"), "messages")
+    return conn, col, FakeEmbedder()
+
+
+def test_contextual_embeddings_include_neighbours(tmp_path):
+    conn, col, embedder = _fresh(tmp_path)
+    index_messages(conn, col, embedder, context_mode="prevnext")
+    assert any(
+        "tutto bene grazie" in t and "andiamo al mare?" in t and "volentieri domenica" in t
+        for t in embedder.seen
+    )
+    # The stored document stays the clean, quotable message.
+    got = col.get(ids=["m3"], include=["documents"])
+    assert got["documents"][0] == "Alice: andiamo al mare?"
+
+
+def test_context_mode_change_triggers_reindex(tmp_path):
+    conn, col, embedder = _fresh(tmp_path)
+    index_messages(conn, col, embedder)
+    stats = index_messages(conn, col, embedder, context_mode="prevnext")
+    assert stats.embedded == 5
+    again = index_messages(conn, col, embedder, context_mode="prevnext")
+    assert again.embedded == 0
+    assert again.skipped == 5
+
+
+def test_invalid_context_mode(tmp_path):
+    conn, col, embedder = _fresh(tmp_path)
+    try:
+        index_messages(conn, col, embedder, context_mode="bogus")
+    except ValueError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected ValueError")

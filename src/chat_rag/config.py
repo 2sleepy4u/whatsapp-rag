@@ -25,6 +25,7 @@ class Settings:
     llm_num_predict: int
     llm_think: bool
     system_prompt_file: str | None = None
+    embed_context: str = "none"
     transcribe_engine: str = "auto"
     whisper_model: str = "small"
     whisper_language: str = "it"
@@ -60,6 +61,7 @@ def load_settings() -> Settings:
         llm_num_predict=int(_env("LLM_NUM_PREDICT", "1024")),
         llm_think=_env_bool("LLM_THINK", False),
         system_prompt_file=_env("SYSTEM_PROMPT_FILE", "") or None,
+        embed_context=_env("EMBED_CONTEXT", "none"),
         transcribe_engine=_env("TRANSCRIBE_ENGINE", "auto"),
         whisper_model=_env("WHISPER_MODEL", "small"),
         whisper_language=_env("WHISPER_LANGUAGE", "it"),
