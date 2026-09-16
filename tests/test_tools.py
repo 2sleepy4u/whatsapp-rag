@@ -29,6 +29,37 @@ def test_semantic_search_sender_filter(ctx):
     assert all(r["sender"] == "Bob" for r in rows)
 
 
+def test_semantic_search_context_expands_neighbors(ctx):
+    rows = tools.semantic_search(ctx, "mare", top=1, context=2)
+    assert len(rows) == 1
+    hit = rows[0]
+    assert hit["context"]
+    assert all(c["id"] != hit["id"] for c in hit["context"])
+    assert all(len(c["id"]) == 16 for c in hit["context"])
+
+
+def test_hybrid_search_merges_and_dedupes(ctx):
+    rows = tools.hybrid_search(ctx, "dimenticare", top=5)
+    ids = [r["id"] for r in rows]
+    assert len(ids) == len(set(ids))
+    assert all("channels" in r and "score" in r for r in rows)
+    target = f"{3:016x}"
+    assert target in ids
+    hit = next(r for r in rows if r["id"] == target)
+    assert "keyword" in hit["channels"]
+
+
+def test_hybrid_search_context(ctx):
+    rows = tools.hybrid_search(ctx, "mare", top=2, context=1)
+    assert rows
+    assert all("context" in r for r in rows)
+
+
+def test_dispatch_hybrid(ctx):
+    rows = tools.dispatch(ctx, "hybrid_search", {"query": "mare"})
+    assert isinstance(rows, list) and rows
+
+
 def test_get_stats_per_sender(ctx):
     data = tools.get_stats(ctx, "per_sender")
     names = {r["name"]: r for r in data["rows"]}

@@ -93,6 +93,7 @@ def semantic_search(
     sender: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    context: int = 0,
 ) -> list[dict]:
     where = _build_where("message", chat_id, sender, date_from, date_to)
     qvec = ctx.embedder.embed([query])[0]
@@ -116,7 +117,73 @@ def semantic_search(
                 "score": round(1 - dist, 4) if dist is not None else None,
             }
         )
-    return out
+    return _attach_context(ctx, out, context)
+
+
+def _attach_context(ctx: ToolContext, rows: list[dict], context: int) -> list[dict]:
+    """Nest the real messages surrounding each hit so the model gets the exchange."""
+    context = max(0, min(int(context), 10))
+    if not context:
+        return rows
+    for row in rows:
+        data = get_context(ctx, row["id"], before=context, after=context)
+        row["context"] = [m for m in data.get("messages", []) if m["id"] != row["id"]]
+    return rows
+
+
+def _rrf(rank_lists: list[list[str]], k: int = 60) -> dict[str, float]:
+    """Reciprocal Rank Fusion over ranked id lists (higher is better)."""
+    scores: dict[str, float] = {}
+    for ranks in rank_lists:
+        for position, mid in enumerate(ranks):
+            scores[mid] = scores.get(mid, 0.0) + 1.0 / (k + position + 1)
+    return scores
+
+
+def hybrid_search(
+    ctx: ToolContext,
+    query: str,
+    top: int = 10,
+    context: int = 0,
+    chat_id: str | None = None,
+    sender: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[dict]:
+    """Semantic + keyword results fused with RRF (best default for factual lookups)."""
+    top = max(1, min(top, 50))
+    pool = min(top * 2, 50)
+    sem = semantic_search(
+        ctx, query, top=pool, chat_id=chat_id, sender=sender,
+        date_from=date_from, date_to=date_to,
+    )
+    kw = keyword_search(ctx, query, top=pool, chat_id=chat_id, date_from=date_from, date_to=date_to)
+
+    by_id: dict[str, dict] = {}
+    for rec in sem:
+        by_id.setdefault(rec["id"], rec)
+    for rec in kw:
+        by_id.setdefault(rec["id"], rec)
+
+    sem_rank = {rec["id"]: i + 1 for i, rec in enumerate(sem)}
+    kw_rank = {rec["id"]: i + 1 for i, rec in enumerate(kw)}
+    scores = _rrf([list(sem_rank), list(kw_rank)])
+    ranked = sorted(scores, key=lambda mid: scores[mid], reverse=True)[:top]
+
+    out: list[dict] = []
+    for mid in ranked:
+        rec = dict(by_id[mid])
+        channels = []
+        if mid in sem_rank:
+            channels.append("semantic")
+        if mid in kw_rank:
+            channels.append("keyword")
+        rec["score"] = round(scores[mid], 6)
+        rec["channels"] = channels
+        rec["semantic_rank"] = sem_rank.get(mid)
+        rec["keyword_rank"] = kw_rank.get(mid)
+        out.append(rec)
+    return _attach_context(ctx, out, context)
 
 
 def _fts_query(query: str) -> str:
@@ -373,6 +440,25 @@ TOOL_SCHEMAS: list[dict] = [
                     "query": {"type": "string"},
                     "top": {"type": "integer", "description": "How many results (default 8)"},
                     "sender": {"type": "string", "description": "Filter by sender name"},
+                    "context": {"type": "integer", "description": "Also include this many real messages before/after each hit (default 0)"},
+                    **_FILTERS,
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hybrid_search",
+            "description": "Preferred default for factual lookups: merges semantic meaning and exact keyword search (RRF), best recall.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "top": {"type": "integer", "description": "How many fused results (default 10)"},
+                    "sender": {"type": "string", "description": "Filter by sender name"},
+                    "context": {"type": "integer", "description": "Also include this many real messages before/after each hit (default 0)"},
                     **_FILTERS,
                 },
                 "required": ["query"],
@@ -488,6 +574,11 @@ def _call_semantic(ctx: ToolContext, args: dict) -> Any:
     return semantic_search(ctx, **args)
 
 
+def _call_hybrid(ctx: ToolContext, args: dict) -> Any:
+    args = {k: v for k, v in args.items() if v is not None}
+    return hybrid_search(ctx, **args)
+
+
 def _call_keyword(ctx: ToolContext, args: dict) -> Any:
     args = {k: v for k, v in args.items() if v is not None}
     return keyword_search(ctx, **args)
@@ -525,6 +616,7 @@ def _call_phrase(ctx: ToolContext, args: dict) -> Any:
 _DISPATCH: dict[str, Dispatch] = {
     "list_chats": _call_list,
     "semantic_search": _call_semantic,
+    "hybrid_search": _call_hybrid,
     "keyword_search": _call_keyword,
     "get_stats": _call_stats,
     "get_context": _call_context,
